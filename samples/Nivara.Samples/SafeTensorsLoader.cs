@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.IO.MemoryMappedFiles;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -8,18 +9,22 @@ namespace Nivara.Samples;
 
 public static class SafeTensorsLoader
 {
+    /// <summary>
+    /// Loads a safetensors file into F32 tensors. The file is memory-mapped and read on demand
+    /// per tensor, so no full-file <see cref="byte"/>[] is ever materialized.
+    /// </summary>
     public static Dictionary<string, (float[] Data, int[] Shape)> Read(string path)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        if (!File.Exists(path))
-            throw new FileNotFoundException($"SafeTensors file not found: {path}", path);
+        => Read<float>(path);
 
-        return Read(File.ReadAllBytes(path));
-    }
-
+    /// <summary>Loads F32 tensors from an in-memory safetensors buffer (e.g. a test fixture).</summary>
     public static Dictionary<string, (float[] Data, int[] Shape)> Read(byte[] bytes)
-        => Read<float>(bytes).ToDictionary(kvp => kvp.Key, kvp => (kvp.Value.Data, kvp.Value.Shape));
+        => Read<float>(bytes);
 
+    /// <summary>
+    /// Loads a safetensors file as <typeparamref name="T"/> tensors, translating each tensor's
+    /// on-disk dtype to <typeparamref name="T"/> at load time. The file is memory-mapped and read
+    /// on demand per tensor, so no full-file <see cref="byte"/>[] is ever materialized.
+    /// </summary>
     public static Dictionary<string, (T[] Data, int[] Shape)> Read<T>(string path)
         where T : struct, IFloatingPointIeee754<T>
     {
@@ -27,14 +32,47 @@ public static class SafeTensorsLoader
         if (!File.Exists(path))
             throw new FileNotFoundException($"SafeTensors file not found: {path}", path);
 
-        return Read<T>(File.ReadAllBytes(path));
+        long fileLength = new FileInfo(path).Length;
+        if (fileLength < 8)
+            throw new InvalidDataException("SafeTensors file is too small to contain a header.");
+        if (fileLength > int.MaxValue)
+            throw new NotSupportedException(
+                "SafeTensors files larger than 2 GB are not supported by the memory-mapped loader.");
+
+        using var map = MemoryMappedFile.CreateFromFile(path, FileMode.Open, null, 0, MemoryMappedFileAccess.Read);
+        using var view = map.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+
+        unsafe
+        {
+            byte* pointer = null;
+            view.SafeMemoryMappedViewHandle.AcquirePointer(ref pointer);
+            try
+            {
+                // Span length comes from FileInfo (file state at open), not the view capacity,
+                // which is rounded up to the system page size.
+                return Read<T>(new ReadOnlySpan<byte>(pointer, (int)fileLength));
+            }
+            finally
+            {
+                if (pointer != null)
+                    view.SafeMemoryMappedViewHandle.ReleasePointer();
+            }
+        }
     }
 
+    /// <summary>
+    /// Loads <typeparamref name="T"/> tensors from an in-memory safetensors buffer
+    /// (e.g. a test fixture).
+    /// </summary>
     public static Dictionary<string, (T[] Data, int[] Shape)> Read<T>(byte[] bytes)
         where T : struct, IFloatingPointIeee754<T>
+        => Read<T>(bytes.AsSpan());
+
+    static Dictionary<string, (T[] Data, int[] Shape)> Read<T>(ReadOnlySpan<byte> buffer)
+        where T : struct, IFloatingPointIeee754<T>
     {
-        var entries = ParseHeader(bytes, out int dataOffset);
-        var dataBuffer = bytes.AsSpan(dataOffset);
+        var entries = ParseHeader(buffer, out int dataOffset);
+        var dataBuffer = buffer.Slice(dataOffset);
         var result = new Dictionary<string, (T[] Data, int[] Shape)>(StringComparer.Ordinal);
 
         foreach (var (name, dtype, shape, begin, end) in entries)
@@ -84,20 +122,20 @@ public static class SafeTensorsLoader
             destination[i] = BitConverter.UInt32BitsToSingle((uint)source[i] << 16);
     }
 
-    static (string Name, string Dtype, int[] Shape, int Begin, int End)[] ParseHeader(byte[] bytes, out int dataOffset)
+    static (string Name, string Dtype, int[] Shape, int Begin, int End)[] ParseHeader(ReadOnlySpan<byte> buffer, out int dataOffset)
     {
-        if (bytes.Length < 8)
+        if (buffer.Length < 8)
             throw new InvalidDataException("SafeTensors file is too small to contain a header.");
 
-        ulong headerSize = BinaryPrimitives.ReadUInt64LittleEndian(bytes.AsSpan(0, 8));
+        ulong headerSize = BinaryPrimitives.ReadUInt64LittleEndian(buffer.Slice(0, 8));
 
-        if (8 + headerSize > (ulong)bytes.Length)
+        if (8 + headerSize > (ulong)buffer.Length)
             throw new InvalidDataException(
-                $"Header size ({headerSize}) exceeds file size ({bytes.Length}).");
+                $"Header size ({headerSize}) exceeds file size ({buffer.Length}).");
 
         dataOffset = 8 + (int)headerSize;
 
-        var headerJson = System.Text.Encoding.UTF8.GetString(bytes, 8, (int)headerSize);
+        var headerJson = System.Text.Encoding.UTF8.GetString(buffer.Slice(8, (int)headerSize));
         using var doc = JsonDocument.Parse(headerJson);
 
         var root = doc.RootElement;
