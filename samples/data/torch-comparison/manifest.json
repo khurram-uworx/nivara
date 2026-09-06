@@ -1502,5 +1502,123 @@
       "embedding_dim": 8,
       "padding_index": -1
     }
+  },
+  "llama_attn_bias": {
+    "layer": "LlamaCausalAttention",
+    "qkv_bias": true,
+    "input_shape": [
+      5,
+      64
+    ],
+    "q_weight_shape": [
+      64,
+      64
+    ],
+    "k_weight_shape": [
+      32,
+      64
+    ],
+    "v_weight_shape": [
+      32,
+      64
+    ],
+    "o_weight_shape": [
+      64,
+      64
+    ],
+    "q_bias_shape": [
+      64
+    ],
+    "k_bias_shape": [
+      32
+    ],
+    "v_bias_shape": [
+      32
+    ],
+    "output_shape": [
+      5,
+      64
+    ],
+    "input_grad_shape": [
+      5,
+      64
+    ],
+    "params": {
+      "hidden_size": 64,
+      "num_heads": 4,
+      "num_key_value_heads": 2,
+      "max_position_embeddings": 16,
+      "rope_theta": 10000.0,
+      "qkv_bias": true
+    }
+  },
+  "llama_decoder_bias": {
+    "layer": "LlamaDecoderBlock",
+    "qkv_bias": true,
+    "input_shape": [
+      4,
+      32
+    ],
+    "in_gamma_shape": [
+      32
+    ],
+    "post_gamma_shape": [
+      32
+    ],
+    "q_weight_shape": [
+      32,
+      32
+    ],
+    "k_weight_shape": [
+      16,
+      32
+    ],
+    "v_weight_shape": [
+      16,
+      32
+    ],
+    "o_weight_shape": [
+      32,
+      32
+    ],
+    "q_bias_shape": [
+      32
+    ],
+    "k_bias_shape": [
+      16
+    ],
+    "v_bias_shape": [
+      16
+    ],
+    "gate_weight_shape": [
+      48,
+      32
+    ],
+    "up_weight_shape": [
+      48,
+      32
+    ],
+    "down_weight_shape": [
+      32,
+      48
+    ],
+    "output_shape": [
+      4,
+      32
+    ],
+    "input_grad_shape": [
+      4,
+      32
+    ],
+    "params": {
+      "hidden_size": 32,
+      "num_heads": 4,
+      "num_key_value_heads": 2,
+      "intermediate_size": 48,
+      "max_position_embeddings": 16,
+      "rope_theta": 10000.0,
+      "rms_norm_eps": 1e-05,
+      "qkv_bias": true
+    }
   }
 }

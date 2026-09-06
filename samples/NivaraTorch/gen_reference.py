@@ -1425,6 +1425,172 @@ def run():
     print(f"  {sse_name}: input=[{sse_batch},{sse_max_active}] weight=[{sse_num_emb},{sse_emb_dim}] output={list(sse_out.shape)}")
 
     # =========================================================================
+    # LlamaCausalAttention with QKV bias (qkvBias=true) tests — the Qwen2 variant
+    # Reference: biased Linear projections (input @ W^T + b) -> RoPE -> GQA repeat ->
+    # per-head scaled dot product with an additive causal mask -> concat -> output
+    # projection. Appended at the END of the generation stream so all earlier
+    # fixtures stay bit-identical. Saves input, the four Linear weights ([out, in]
+    # row-major), the Q/K/V biases, output, and the input + bias gradients of the
+    # sum.
+    # =========================================================================
+    attn_bias_rng = torch.Generator().manual_seed(1313)
+
+    attn_b_hidden = 64
+    attn_b_heads = 4
+    attn_b_kv_heads = 2
+    attn_b_head_dim = 16
+    attn_b_seq = 5
+
+    wq_b = torch.randn(attn_b_heads * attn_b_head_dim, attn_b_hidden, generator=attn_bias_rng)
+    wk_b = torch.randn(attn_b_kv_heads * attn_b_head_dim, attn_b_hidden, generator=attn_bias_rng)
+    wv_b = torch.randn(attn_b_kv_heads * attn_b_head_dim, attn_b_hidden, generator=attn_bias_rng)
+    wo_b = torch.randn(attn_b_hidden, attn_b_hidden, generator=attn_bias_rng)
+    bq_b = torch.randn(attn_b_heads * attn_b_head_dim, generator=attn_bias_rng).requires_grad_(True)
+    bk_b = torch.randn(attn_b_kv_heads * attn_b_head_dim, generator=attn_bias_rng).requires_grad_(True)
+    bv_b = torch.randn(attn_b_kv_heads * attn_b_head_dim, generator=attn_bias_rng).requires_grad_(True)
+    attn_b_inp = torch.randn(attn_b_seq, attn_b_hidden, generator=attn_bias_rng).requires_grad_(True)
+
+    q_b = attn_b_inp @ wq_b.t() + bq_b
+    k_b = attn_b_inp @ wk_b.t() + bk_b
+    v_b = attn_b_inp @ wv_b.t() + bv_b
+    cos_b, sin_b = build_rope_cache(attn_b_head_dim, attn_b_seq, 10000.0)
+    q_b = apply_rope(q_b, cos_b, sin_b)
+    k_b = apply_rope(k_b, cos_b, sin_b)
+    attn_b_mask = torch.triu(torch.full((attn_b_seq, attn_b_seq), float("-inf")), diagonal=1)
+    attn_b_scale = 1.0 / math.sqrt(attn_b_head_dim)
+    attn_b_out = gqa_mha(q_b, k_b, v_b, attn_b_heads, attn_b_kv_heads, attn_b_mask, attn_b_scale) @ wo_b.t()
+    attn_b_out.sum().backward()
+
+    attn_b_name = "llama_attn_bias"
+    attn_b_inp.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_input.bin"))
+    wq_b.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_qw.bin"))
+    wk_b.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_kw.bin"))
+    wv_b.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_vw.bin"))
+    wo_b.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_ow.bin"))
+    bq_b.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_qb.bin"))
+    bk_b.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_kb.bin"))
+    bv_b.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_vb.bin"))
+    attn_b_out.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_output.bin"))
+    attn_b_inp.grad.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_input_grad.bin"))
+    bq_b.grad.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_q_bias_grad.bin"))
+    bk_b.grad.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_k_bias_grad.bin"))
+    bv_b.grad.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{attn_b_name}_v_bias_grad.bin"))
+
+    manifest[attn_b_name] = {
+        "layer": "LlamaCausalAttention",
+        "qkv_bias": True,
+        "input_shape": [attn_b_seq, attn_b_hidden],
+        "q_weight_shape": list(wq_b.shape),
+        "k_weight_shape": list(wk_b.shape),
+        "v_weight_shape": list(wv_b.shape),
+        "o_weight_shape": list(wo_b.shape),
+        "q_bias_shape": list(bq_b.shape),
+        "k_bias_shape": list(bk_b.shape),
+        "v_bias_shape": list(bv_b.shape),
+        "output_shape": list(attn_b_out.shape),
+        "input_grad_shape": list(attn_b_inp.grad.shape),
+        "params": {"hidden_size": attn_b_hidden, "num_heads": attn_b_heads,
+                   "num_key_value_heads": attn_b_kv_heads, "max_position_embeddings": 16,
+                   "rope_theta": 10000.0, "qkv_bias": True},
+    }
+    print(f"  {attn_b_name}: input=[{attn_b_seq},{attn_b_hidden}] q_bias={list(bq_b.shape)} output={list(attn_b_out.shape)}")
+
+    # =========================================================================
+    # LlamaDecoderBlock with QKV bias (qkvBias=true) tests — the Qwen2 variant
+    # Reference: RMSNorm(affine) -> biased Llama attention -> residual; then
+    # RMSNorm(affine) -> silu(gate(h)) * up(h) -> down -> residual. Appended at the
+    # END of the generation stream with a dedicated RNG so all earlier fixtures stay
+    # bit-identical. Saves input, every learnable weight, the Q/K/V biases, output,
+    # and the input + bias gradients of the sum.
+    # =========================================================================
+    dec_bias_rng = torch.Generator().manual_seed(1414)
+
+    dec_b_hidden = 32
+    dec_b_heads = 4
+    dec_b_kv_heads = 2
+    dec_b_head_dim = 8
+    dec_b_seq = 4
+    dec_b_inter = 48
+    dec_b_eps = 1e-5
+
+    dec_b_in_gamma = torch.randn(dec_b_hidden, generator=dec_bias_rng) * 0.1 + 1.0
+    dec_b_post_gamma = torch.randn(dec_b_hidden, generator=dec_bias_rng) * 0.1 + 1.0
+    dec_b_wq = torch.randn(dec_b_heads * dec_b_head_dim, dec_b_hidden, generator=dec_bias_rng)
+    dec_b_wk = torch.randn(dec_b_kv_heads * dec_b_head_dim, dec_b_hidden, generator=dec_bias_rng)
+    dec_b_wv = torch.randn(dec_b_kv_heads * dec_b_head_dim, dec_b_hidden, generator=dec_bias_rng)
+    dec_b_wo = torch.randn(dec_b_hidden, dec_b_hidden, generator=dec_bias_rng)
+    dec_b_bq = torch.randn(dec_b_heads * dec_b_head_dim, generator=dec_bias_rng).requires_grad_(True)
+    dec_b_bk = torch.randn(dec_b_kv_heads * dec_b_head_dim, generator=dec_bias_rng).requires_grad_(True)
+    dec_b_bv = torch.randn(dec_b_kv_heads * dec_b_head_dim, generator=dec_bias_rng).requires_grad_(True)
+    dec_b_gate = torch.randn(dec_b_inter, dec_b_hidden, generator=dec_bias_rng)
+    dec_b_up = torch.randn(dec_b_inter, dec_b_hidden, generator=dec_bias_rng)
+    dec_b_down = torch.randn(dec_b_hidden, dec_b_inter, generator=dec_bias_rng)
+    dec_b_inp = torch.randn(dec_b_seq, dec_b_hidden, generator=dec_bias_rng).requires_grad_(True)
+
+    h_b = rms_norm_affine(dec_b_inp, dec_b_in_gamma, dec_b_eps)
+    qq_b = h_b @ dec_b_wq.t() + dec_b_bq
+    kk_b = h_b @ dec_b_wk.t() + dec_b_bk
+    vv_b = h_b @ dec_b_wv.t() + dec_b_bv
+    cos_b, sin_b = build_rope_cache(dec_b_head_dim, dec_b_seq, 10000.0)
+    qq_b = apply_rope(qq_b, cos_b, sin_b)
+    kk_b = apply_rope(kk_b, cos_b, sin_b)
+    dec_b_mask = torch.triu(torch.full((dec_b_seq, dec_b_seq), float("-inf")), diagonal=1)
+    attn_b_h = gqa_mha(qq_b, kk_b, vv_b, dec_b_heads, dec_b_kv_heads, dec_b_mask, 1.0 / math.sqrt(dec_b_head_dim)) @ dec_b_wo.t()
+    h_b = dec_b_inp + attn_b_h
+
+    ffn_b_in = rms_norm_affine(h_b, dec_b_post_gamma, dec_b_eps)
+    gate_b_h = F.silu(ffn_b_in @ dec_b_gate.t())
+    up_b_h = ffn_b_in @ dec_b_up.t()
+    mlp_b_h = (gate_b_h * up_b_h) @ dec_b_down.t()
+    dec_b_out = h_b + mlp_b_h
+    dec_b_out.sum().backward()
+
+    dec_b_name = "llama_decoder_bias"
+    dec_b_inp.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_input.bin"))
+    dec_b_in_gamma.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_in_gamma.bin"))
+    dec_b_post_gamma.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_post_gamma.bin"))
+    dec_b_wq.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_qw.bin"))
+    dec_b_wk.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_kw.bin"))
+    dec_b_wv.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_vw.bin"))
+    dec_b_wo.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_ow.bin"))
+    dec_b_bq.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_qb.bin"))
+    dec_b_bk.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_kb.bin"))
+    dec_b_bv.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_vb.bin"))
+    dec_b_gate.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_gatew.bin"))
+    dec_b_up.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_upw.bin"))
+    dec_b_down.numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_downw.bin"))
+    dec_b_out.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_output.bin"))
+    dec_b_inp.grad.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_input_grad.bin"))
+    dec_b_bq.grad.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_q_bias_grad.bin"))
+    dec_b_bk.grad.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_k_bias_grad.bin"))
+    dec_b_bv.grad.detach().numpy().astype(np.float32).tofile(os.path.join(TEST_DIR, f"{dec_b_name}_v_bias_grad.bin"))
+
+    manifest[dec_b_name] = {
+        "layer": "LlamaDecoderBlock",
+        "qkv_bias": True,
+        "input_shape": [dec_b_seq, dec_b_hidden],
+        "in_gamma_shape": list(dec_b_in_gamma.shape),
+        "post_gamma_shape": list(dec_b_post_gamma.shape),
+        "q_weight_shape": list(dec_b_wq.shape),
+        "k_weight_shape": list(dec_b_wk.shape),
+        "v_weight_shape": list(dec_b_wv.shape),
+        "o_weight_shape": list(dec_b_wo.shape),
+        "q_bias_shape": list(dec_b_bq.shape),
+        "k_bias_shape": list(dec_b_bk.shape),
+        "v_bias_shape": list(dec_b_bv.shape),
+        "gate_weight_shape": list(dec_b_gate.shape),
+        "up_weight_shape": list(dec_b_up.shape),
+        "down_weight_shape": list(dec_b_down.shape),
+        "output_shape": list(dec_b_out.shape),
+        "input_grad_shape": list(dec_b_inp.grad.shape),
+        "params": {"hidden_size": dec_b_hidden, "num_heads": dec_b_heads,
+                   "num_key_value_heads": dec_b_kv_heads, "intermediate_size": dec_b_inter,
+                   "max_position_embeddings": 16, "rope_theta": 10000.0, "rms_norm_eps": dec_b_eps,
+                   "qkv_bias": True},
+    }
+    print(f"  {dec_b_name}: input=[{dec_b_seq},{dec_b_hidden}] q_bias={list(dec_b_bq.shape)} output={list(dec_b_out.shape)}")
+
+    # =========================================================================
     # Write manifest
     # =========================================================================
     manifest_path = os.path.join(TEST_DIR, "manifest.json")

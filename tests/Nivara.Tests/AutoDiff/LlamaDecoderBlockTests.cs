@@ -56,6 +56,58 @@ public class LlamaDecoderBlockTests
     }
 
     [Test]
+    public void Constructor_QkvBiasTrue_CreatesAttentionQkvBiasesOnly()
+    {
+        const int hidden = 384, numHeads = 8, numKvHeads = 4, intermediate = 1024;
+        using var block = new LlamaDecoderBlock<float>(hidden, numHeads, numKvHeads, intermediate, qkvBias: true);
+
+        Assert.That(block.Attention.QProj.Bias, Is.Not.Null);
+        Assert.That(block.Attention.KProj.Bias, Is.Not.Null);
+        Assert.That(block.Attention.VProj.Bias, Is.Not.Null);
+        Assert.That(block.Attention.OProj.Bias, Is.Null);
+        Assert.That(block.GateProj.Bias, Is.Null, "FFN projections stay bias-free with qkvBias=true");
+        Assert.That(block.UpProj.Bias, Is.Null, "FFN projections stay bias-free with qkvBias=true");
+        Assert.That(block.DownProj.Bias, Is.Null, "FFN projections stay bias-free with qkvBias=true");
+    }
+
+    [Test]
+    public void Constructor_QkvBiasFalse_AttentionBiasFree()
+    {
+        const int hidden = 384, numHeads = 8, numKvHeads = 4, intermediate = 1024;
+        using var block = new LlamaDecoderBlock<float>(hidden, numHeads, numKvHeads, intermediate, qkvBias: false);
+
+        Assert.That(block.Attention.QProj.Bias, Is.Null);
+        Assert.That(block.Attention.KProj.Bias, Is.Null);
+        Assert.That(block.Attention.VProj.Bias, Is.Null);
+        Assert.That(block.Attention.OProj.Bias, Is.Null);
+    }
+
+    [Test]
+    public void Forward_InsideGrad_QkvBiasTrue_AccumulatesFiniteBiasGradients()
+    {
+        const int hidden = 192, numHeads = 6, numKvHeads = 3, intermediate = 512, seqLen = 4;
+        using var gradScope = GradientUtils.Grad();
+        using var block = new LlamaDecoderBlock<float>(hidden, numHeads, numKvHeads, intermediate, maxPositionEmbeddings: 32, qkvBias: true);
+
+        var inputData = new float[seqLen * hidden];
+        var rnd = new Random(17);
+        for (int i = 0; i < inputData.Length; i++)
+            inputData[i] = (float)(rnd.NextDouble() * 2 - 1);
+        var input = ReverseGradTensor<float>.FromMatrix(inputData, seqLen, hidden, requiresGrad: true);
+
+        var output = block.Forward(input);
+        var loss = ReverseGradOperations.Sum(output);
+        loss.Backward();
+
+        Assert.That(block.Attention.QProj.Bias!.Tensor.Grad, Is.Not.Null, "q_proj bias gradient must flow");
+        Assert.That(block.Attention.KProj.Bias!.Tensor.Grad, Is.Not.Null, "k_proj bias gradient must flow");
+        Assert.That(block.Attention.VProj.Bias!.Tensor.Grad, Is.Not.Null, "v_proj bias gradient must flow");
+        foreach (var g in new[] { block.Attention.QProj.Bias!.Tensor.Grad!, block.Attention.KProj.Bias!.Tensor.Grad!, block.Attention.VProj.Bias!.Tensor.Grad! })
+            foreach (var v in g)
+                Assert.That(float.IsNaN(v) || float.IsInfinity(v), Is.False, "Block bias gradient must be finite.");
+    }
+
+    [Test]
     public void Forward_ResidualAdds_ChangeOutputFromRawNormPath()
     {
         // With all weights identity-ish (Linear defaults are small Kaiming), the residual

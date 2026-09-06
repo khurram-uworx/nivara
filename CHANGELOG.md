@@ -4,6 +4,19 @@ All notable changes to Nivara are documented here. Released versions are publish
 
 ## [Unreleased]
 
+### Added
+
+- **Optional QKV bias on Llama attention for Qwen2-family checkpoints (#384)** —
+  `LlamaCausalAttention<T>` and `LlamaDecoderBlock<T>` gained a `bool qkvBias = false`
+  constructor option. Qwen2-style models attach a bias to the self-attention
+  `q_proj`/`k_proj`/`v_proj` projections; canonical Llama uses bias-free projections and
+  stays byte-identical with the default. When enabled, only the Q/K/V projections carry a
+  `[1, outFeatures]` bias parameter (`o_proj` and the FFN projections remain bias-free),
+  and `LlamaLoader.Load` auto-detects biased Qwen2 checkpoints from safetensors
+  (presence of `model.layers.0.self_attn.q_proj.bias`). Backward gradient flow through the
+  new bias parameters is Torch-verified (`llama_attn_bias`/`llama_decoder_bias` parity
+  fixtures) plus structural AutoDiff coverage.
+
 ### Changed
 
 - **Nested (non-slot) cumulative windows fall back to exact boundary materialization (#360)** —
