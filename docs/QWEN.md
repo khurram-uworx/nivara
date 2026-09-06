@@ -74,6 +74,38 @@ everything else reused the SmolLM machinery unchanged (`LlamaLoader`,
 | `LlamaKVCache<T>` + `ForwardCached` | **sample** | per-token KV-cached decode |
 | `QwenChatClient<T>`, `QwenChatTemplate`, `QwenToolCallParser`, `QwenSampleTools` | **sample** `samples/NivaraChat/Qwen/` | the `IChatClient` + tool loop |
 
+### The `qkvBias` option (public API)
+
+Qwen2-family checkpoints attach a bias to the self-attention `q_proj`, `k_proj`,
+and `v_proj` linear projections on every block; canonical Llama uses bias-free
+projections. Both core modules expose this as an explicit, default-off option
+(`src/Nivara/AutoDiff/Nn/`):
+
+```csharp
+var attn = new LlamaCausalAttention<T>(hiddenSize, numHeads, numKeyValueHeads,
+    maxPositionEmbeddings: 32768, ropeTheta: 1_000_000f, qkvBias: true);
+var block = new LlamaDecoderBlock<T>(hiddenSize, numHeads, numKeyValueHeads,
+    intermediateSize, rmsNormEps: 1e-6f, maxPositionEmbeddings: 32768,
+    ropeTheta: 1_000_000f, qkvBias: true);
+```
+
+Semantics:
+
+- `qkvBias` defaults to **`false`** — dependency-free canonical Llama/SmolLM, byte
+  identical to prior releases. Existing call sites are unaffected.
+- When `true`, only **Q/K/V** projections carry a `bias` parameter
+  (`QProj.Bias` / `KProj.Bias` / `VProj.Bias`, shapes `[1, numHeads·headDim]` and
+  `[1, numKeyValueHeads·headDim]`); `OProj` and the FFN projections stay bias-free,
+  matching Qwen2 architecture.
+- `LlamaLoader.Load` **auto-detects** biased checkpoints from safetensors
+  (presence of `model.layers.0.self_attn.q_proj.bias`) and passes `qkvBias: true`
+  through — Qwen2.5 loads with zero caller changes.
+- Backward is verified end-to-end: `qkvBias=true` forward output, input gradient,
+  and Q/K/V bias gradients match PyTorch bit-for-bit within tolerance
+  (`llama_attn_bias` / `llama_decoder_bias` fixtures below), and the cached
+  single-token decode path applies the bias consistently with full forward
+  (structural AutoDiff tests). CHANGELOG entry: `#384`.
+
 The `QwenChatClient` is a plain `Microsoft.Extensions.AI.IChatClient` over
 `LlamaForCausalLM<T>` + `Gpt2BpeTokenizer` + `LlamaKVCache<T>`, wrapped by MEAI
 10.9.0's `FunctionInvokingChatClient` for the loop. It runs **inference-default**
@@ -310,7 +342,9 @@ streaming modes with the same generation core.
   *caller* changes (10 tensor names, `tie_word_embeddings`, q/k/v bias variant).
   The q/k/v-bias load surfaced an additive library gap — `LlamaCausalAttention` /
   `LlamaDecoderBlock` gained an optional `qkvBias` parameter (default `false`,
-  canonical Llama unchanged; **tracked separately as #384**).
+  canonical Llama unchanged). Backward coverage for the bias path (forward output,
+  input grad, Q/K/V bias grads vs PyTorch, plus cached-vs-full parity) is tracked
+  and closed via **#384**; see *The `qkvBias` option (public API)* above.
 - **Tool turn: 19/19 ids byte-exact** vs the Torch greedy reference — the
   structural function-call contract (`<tool_call>` … `</tool_call>`, id-exact).
 - **Final turn: semantic parity, with the tie-flip provably a near-tie.** At
