@@ -396,7 +396,7 @@ Tested examples:
 | `--qwen plain --text "The capital of France is" --max-new-tokens 24` | f32 | Streams "The capital of France is Paris." then stops on `<\|im_end\|>` |
 
 Ground truth, the format findings, the BF16 loader benchmark, and the PyTorch
-parity evidence live in `docs/research/QWEN-TOOL-CALLING.md`.
+parity evidence live in `docs/QWEN.md`.
 
 Uses: `LlamaForCausalLM<T>`, `LlamaLoader.Load`, `LlamaKVCache<T>`, `SafeTensorsLoader.Read<T>` / `ReadUInt16` + `WidenBf16ToF32`, `Gpt2BpeTokenizer` (Qwen Split-regex pretokenization), `QwenChatClient<T>` (`IChatClient`), `QwenChatTemplate` (byte-exact renderer), `QwenToolCallParser` (`<tool_call>` → `FunctionCallContent`), `FunctionInvokingChatClient` (MEAI tool loop), `AIFunctionFactory` (`GetWeather`).
 

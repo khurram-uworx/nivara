@@ -275,7 +275,7 @@ faster load that keeps the lossless raw source:
   half the memory, with identical F32 inference numerics (widening is lossless —
   BF16 is the high 16 bits of float32).
 
-See `docs/research/QWEN-TOOL-CALLING.md` (Phase 2.5) and
+See `docs/QWEN.md` (Phase 2.5) and
 `SafeTensorsLoaderBf16Tests` for the full context.
 
 ### Example — train a `BFloat16` linear model

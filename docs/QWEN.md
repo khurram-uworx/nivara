@@ -1,4 +1,4 @@
-# Qwen2.5 Tool Calling on Nivara (issue #382, Phase 3)
+# Qwen2.5 Tool Calling on Nivara (#382)
 
 Native function calling with **Qwen2.5-0.5B-Instruct** served as a plain
 `Microsoft.Extensions.AI.IChatClient` over Nivara's in-process `LlamaForCausalLM`
@@ -10,6 +10,85 @@ This document records the ground-truth findings (the format, the vocab-size
 subtlety, the tokenizer divergence, the loader benchmark), what was reusable from
 Phase B, what was fixed and why, and the verification evidence. The code lives in
 `samples/NivaraChat/Qwen/`; the tests in `tests/Nivara.Tests/Qwen/`.
+
+Related Qwen work, tracked separately: #384 (qkvBias loader gap), #386 (Qwen
+distillation), #387 (BF16-in-memory SIMD-dot), #388 (fused BF16→F32 read),
+#390 (GGUF backend), #391 (revisit BF16 workarounds when `Vector<BFloat16>` SIMD
+lands).
+
+---
+
+## How Qwen works on Nivara — the library map
+
+An engineer wanting to run or extend Qwen should start here. Two sample READMEs
+anchor the fuller technical detail and are cross-linked throughout:
+
+- **`samples/NivaraChat/README.md`** — the user-facing `--qwen` demo (function
+  calling via `IChatClient`): `--qwen tools-weather|chat|plain`, the
+  `FunctionInvokingChatClient` tool loop, and the code layout under
+  `samples/NivaraChat/Qwen/`.
+- **`samples/NivaraInference/README.md`** — the low-level library scratchpad:
+  `qwen tools` (function calling), `qwen distill` (teacher distillation,
+  #386), `qwen benchmark` (KV-cached vs full re-forward), plus the weight
+  loading, narrow-precision, and SafeTensors loader sections.
+
+### The load path (checkpoint → tensors)
+
+```
+config.json + model.safetensors + vocab.json + merges.txt + tokenizer.json
+  → SafeTensorsLoader.ReadUInt16      (BF16-on-disk → raw ushort[], #388)
+  → WidenBf16ToF32 (SIMD Vector<ushort>)  → F32
+  → LlamaLoader.Load + LlamaConfig.FromJson → LlamaForCausalLM<T>
+  → Gpt2BpeTokenizer  (Qwen Split-regex pretokenizer + added tokens)
+```
+
+> **Why we widen to F32 at load (and don't run BF16 compute)** — Qwen is
+> BF16-on-disk (~1 GB), but Nivara **widens to F32 once at load time** and runs a
+> pure-F32 loop. The reason: `Vector<BFloat16>` is **unsupported** on .NET 11
+> (`IsSupported == false` at every width), so BF16 compute falls back to a scalar
+> BCL path that is radically slower than F32 SIMD, while the widen is **lossless**
+> (BF16 *is* the top 16 bits of float32) and costs only a one-time pass. This is
+> Nivara's current recommendation; its full rationale, the A/B numbers, and the
+> `ReadUInt16`/`WidenBf16ToF32` mechanics live in **[`docs/BFLOAT16.md`](BFLOAT16.md)**.
+> When `Vector<BFloat16>` SIMD support lands in the runtime this tradeoff is worth
+> revisiting (#387, #388, **#391**).
+
+Qwen's config is Llama-loader-compatible: `hidden 896`, 24 layers, **GQA 14↔2**
+KV heads, SiLU gated FFN, `RMSNorm` (ε=1e-6), **RoPE θ=1_000_000** (10× SmolLM),
+`max_position_embeddings 32768`, `vocab 151936`, tied embeddings, and **biased
+Q/K/V projections**. Of these only the biased projections were a real core gap —
+everything else reused the SmolLM machinery unchanged (`LlamaLoader`,
+`LlamaForCausalLM<T>`, GQA `GqaRepeatKV`, `RMSNorm<T>`, SiLU, RoPE
+`rotate_half`, tied LM head). See `samples/NivaraInference/README.md` →
+"Qwen2.5-0.5B-Instruct" for the reusable-vs-new breakdown.
+
+### What was added where (core vs sample-scoped)
+
+| Piece | Location | Notes |
+|---|---|---|
+| `qkvBias` flag on `LlamaCausalAttention<T>` / `LlamaDecoderBlock<T>` | **core** `src/Nivara/AutoDiff/Nn/` | the one additive core change (#384); default `false`, SmolLM unchanged |
+| `SafeTensorsLoader.ReadUInt16` + SIMD `WidenBf16ToF32` | **core** | #388; ~2.5× faster / half the RAM vs `Read<float>`, lossless BF16→F32 |
+| `LlamaForCausalLM<T>`, `LlamaConfig`, `LlamaLoader`, `StateDictLoader` | **sample** `samples/Nivara.Samples/` | Qwen loads via the same route SmolLM uses |
+| `Gpt2BpeTokenizer` Qwen preamble | **sample** `samples/Nivara.Samples/` | `Split`-regex pretokenize + added-token merge |
+| `LlamaKVCache<T>` + `ForwardCached` | **sample** | per-token KV-cached decode |
+| `QwenChatClient<T>`, `QwenChatTemplate`, `QwenToolCallParser`, `QwenSampleTools` | **sample** `samples/NivaraChat/Qwen/` | the `IChatClient` + tool loop |
+
+The `QwenChatClient` is a plain `Microsoft.Extensions.AI.IChatClient` over
+`LlamaForCausalLM<T>` + `Gpt2BpeTokenizer` + `LlamaKVCache<T>`, wrapped by MEAI
+10.9.0's `FunctionInvokingChatClient` for the loop. It runs **inference-default**
+(ADR-001/002): `model.Eval()`, never inside `GradientUtils.Grad()`, so no graph
+nodes are built (`samples/NivaraInference/README.md` documents the same
+inference-default guarantee for its `qwen` modes). The Gpt2BpeTokenizer/loader
+gaps, the byte-exact renderer, and the parser are all described in detail below;
+the `qwen tools`/`qwen distill` feature surface is in
+`samples/NivaraInference/README.md`, and `qwen tools-weather` wiring in
+`samples/NivaraChat/README.md` → "Qwen (`--qwen`)".
+
+> **KV-cache & generation pipeline** — render → `Encode` → `SeedCache` (KV prefill
+> per prompt token) → per-token `ForwardCached` → decode → parse. Greedy `ArgMax`
+> by default; `temperature > 0` adds temperature softmax + optional top-p, from a
+> seeded shared RNG. Stops on `QwenIds.StopIds` `[151645, 151643]`. Details in
+> *The client* section below.
 
 ---
 
@@ -92,7 +171,7 @@ Fix: `Gpt2BpeTokenizer` now reads the declared `Split` regex from a
 `tokenizer.json` (when present) and routes encoding through
 `PretokenizeSplit` → per-chunk byte map. SmolLM's construction (no
 `tokenizer.json` / no Split) still takes the legacy GPT-2 path untouched. This
-was the Phase 2.5 fix (`48c789a`) that made Qwen tokenization match the HuggingFace
+was the fix (`48c789a`) that made Qwen tokenization match the HuggingFace
 reference.
 
 ---
@@ -105,7 +184,7 @@ reference.
 2. **`FunctionInvokingChatClient` binding.** In MEAI 10.9.0 the tool binder
    consumes `FunctionCallContent.Arguments` as an `IDictionary<string, object?>`.
    Phase B's `BuildToolCallContents` JSON path was fragile and could produce a
-   mangled dict (the silent-failure root cause). Phase 3 **builds the dict from
+   mangled dict (the silent-failure root cause). The Qwen client **builds the dict from
    the parsed JSON** (`QwenToolCallParser`), so the binder always sees a correct,
    serializable argument map.
 3. **Assistant-turn contents.** `ChatMessage.Text` is *read-only* (derived from
@@ -224,13 +303,13 @@ streaming modes with the same generation core.
 
 ## Verification evidence
 
-### Phase 2 — Torch parity (`QwenInstructParityTests`, 13 tests)
+### Torch parity (`QwenInstructParityTests`, 13 tests)
 
 - The model/tokenizer load through `LlamaLoader` / `Gpt2BpeTokenizer` with zero
   *caller* changes (10 tensor names, `tie_word_embeddings`, q/k/v bias variant).
   The q/k/v-bias load surfaced an additive library gap — `LlamaCausalAttention` /
   `LlamaDecoderBlock` gained an optional `qkvBias` parameter (default `false`,
-  canonical Llama unchanged; **tracked separately as [#384](https://github.com/khurram-uworx/Nivara/issues/384)**).
+  canonical Llama unchanged; **tracked separately as #384**).
 - **Tool turn: 19/19 ids byte-exact** vs the Torch greedy reference — the
   structural function-call contract (`<tool_call>` … `</tool_call>`, id-exact).
 - **Final turn: semantic parity, with the tie-flip provably a near-tie.** At
@@ -247,7 +326,7 @@ streaming modes with the same generation core.
 - Qwen pretokenization parity: the Split-regex finding from above is pinned by
   tokenizer tests (ids equal the HF `AutoTokenizer` reference).
 
-### Phase 2.5 — BF16 loader gap + benchmark (`SafeTensorsLoaderBf16Tests`)
+### BF16 loader gap + benchmark (`SafeTensorsLoaderBf16Tests`, #388)
 
 - New `SafeTensorsLoader.ReadUInt16(path)` reads a BF16 checkpoint's raw 16-bit
   patterns (half the byte payload of `Read<float>`), with
@@ -266,7 +345,7 @@ streaming modes with the same generation core.
   numerics (widening is lossless — BF16 is the high 16 bits of float32).
 - `ReadUInt16` rejects non-BF16 dtypes with a clear `NotSupportedException`.
 
-### Phase 3 — Qwen tool-calling (this work, 12 new tests)
+### Qwen tool-calling (this work, 12 new tests)
 
 - `QwenChatTemplateTests` (4): the tool prompt and the assistant-tool-call +
   tool-response final prompt render **byte-identical to the Torch fixtures**,
@@ -282,15 +361,14 @@ streaming modes with the same generation core.
 - CLI acceptance: `--qwen tools-weather --text "What's the weather in Paris?"`
   → transcript above, clean answer, loop terminates. `--smollm chat|plain`
   untouched and still working.
-- Regression: 17 Phase 2/2.5 tests re-run green after Phase 3.
+- Regression: 17 earlier parity/loader tests re-run green.
 
 ---
 
-## Phase 5 (later, not blocking #382) — GGUF via LlamaSharp
+## GGUF backend (#390)
 
-A future `--qwen gguf` sub-mode would load the Qwen checkpoint as GGUF through
-LlamaSharp (q4_k_m ≈ 400 MB vs ~2 GB F32) and reuse the *same*
-`QwenChatTemplate` renderer, `QwenToolCallParser`, and tool-loop wiring — the
-format contract is model-loading-agnostic. Plan details live in
-`docs/TODO.md` (deleted after G2 review); the interesting comparison is
-decode tok/s for safetensors-F32 vs GGUF-q4_k_m.
+A future `--qwen gguf` sub-mode would load the Qwen checkpoint as GGUF through a
+.NET GGUF library (candidates: LlamaSharp, TensorSharp — see the issue for the
+evaluation plan) and reuse the *same* `QwenChatTemplate` renderer,
+`QwenToolCallParser`, and tool-loop wiring — the format contract is
+model-loading-agnostic. Tracked in #390.
