@@ -69,12 +69,11 @@ The docs' "~2.5× faster / half the RAM" claim for the two-step was an apples-to
 
 ## Planned commits
 
-1. `docs: plan #388 in TODO.md` — this file.
-2. `refactor(samples): remove ReadUInt16/WidenToF32 two-step from SafeTensorsLoader` — delete two-step symbols, keep `WidenBf16ToF32`, fix doc comments.
-3. `refactor(samples): drop --precision ushort from qwen default load` — simplify `Program.cs` to the fused `Read<float>` path.
-4. `test: add fused Read<float> parity vs scalar reference and Qwen checkpoint check` — update `SafeTensorsLoaderBf16Tests.cs`.
-5. `docs: remove invalid 2.5x framing, document single fused BF16->F32 load` — update the four docs + README load-parse row.
+1. `docs: plan #388 in TODO.md` — this file. ✅ (fcd086c)
+2. `refactor(samples): remove ReadUInt16/WidenToF32 two-step from SafeTensorsLoader` + `refactor(samples): drop --precision ushort from qwen default load` — ✅ combined into a single commit (a8562e6) because `SafeTensorsLoader.cs` and its caller `Program.cs` must land together to keep the build green (removing the symbols without updating the caller breaks compilation).
+3. `test: add fused Read<float> parity vs scalar reference and Qwen checkpoint check` — update `SafeTensorsLoaderBf16Tests.cs`.
+4. `docs: remove invalid 2.5x framing, document single fused BF16->F32 load` — update the four docs + README load-parse row.
 
 ## GitHub issues log
 
-- [ ] Follow-up to create during execution: memory-map I/O to drop the 989 MB `byte[]` from `File.ReadAllBytes` (out of #388 scope). Create via `gh issue create --repo khurram-uworx/Nivara` and record the number here.
+- [ ] #392 — Memory-map the safetensors file to drop the ~1 GB `File.ReadAllBytes` `byte[]` from peak load memory (created while working on #388; out of #388 scope, separate follow-up).
