@@ -28,7 +28,6 @@ class Program
             _ => modelType
         };
         string precision = "f32";
-        bool explicitPrecision = false;
         string mode = "";
         bool simdWiden = false;
         bool noKvCache = false;
@@ -45,26 +44,17 @@ class Program
                     "f32" or "float" => "f32",
                     "bf16" or "bfloat16" => "bf16",
                     "fp16" or "f16" or "half" => "fp16",
-                    "ushort" => "ushort",
                     var other => other
                 };
-                explicitPrecision = true;
                 i++;
             }
             else if (args[i] is "bf16" or "bfloat16")
             {
                 precision = "bf16";
-                explicitPrecision = true;
             }
             else if (args[i] is "fp16" or "f16" or "half")
             {
                 precision = "fp16";
-                explicitPrecision = true;
-            }
-            else if (args[i] == "--ushort")
-            {
-                precision = "ushort";
-                explicitPrecision = true;
             }
             else if (args[i] == "--simd-widen")
                 simdWiden = true;
@@ -91,12 +81,9 @@ class Program
                 mode = args[i];
         }
 
-        if (modelType == "qwen" && !explicitPrecision)
-            precision = "ushort";
-
         if (string.IsNullOrEmpty(modelType) || modelType is "-h" or "--help")
         {
-            Console.WriteLine("Usage: NivaraInference <mobilenet_v2|resnet18|minilm|distilbert|distilbert_sst|smollm|qwen> [--precision f32|bf16|fp16|ushort] [benchmark|similarity|compare|compare_diag|predict|generate|tools|distill|image-path]");
+            Console.WriteLine("Usage: NivaraInference <mobilenet_v2|resnet18|minilm|distilbert|distilbert_sst|smollm|qwen> [--precision f32|bf16|fp16] [benchmark|similarity|compare|compare_diag|predict|generate|tools|distill|image-path]");
             Console.WriteLine();
             Console.WriteLine("Modes:");
             Console.WriteLine("  benchmark         Run timed inference passes and report median timing");
@@ -117,11 +104,10 @@ class Program
             Console.WriteLine("  --seed N           Distill: seed accepted for future use (Kaiming init is unseeded)");
             Console.WriteLine();
             Console.WriteLine("Precision (text models only):");
-            Console.WriteLine("  --precision f32   Full float32 weights (opt-in for qwen; ushort is the qwen default)");
+            Console.WriteLine("  --precision f32   Full float32 weights (qwen default: BF16-on-disk, SIMD-widened to F32 at load).");
             Console.WriteLine("  --precision bf16  BFloat16 (half weight memory). Bare 'bf16' also accepted.");
             Console.WriteLine("  --precision fp16  Half / fp16 (half weight memory). Bare 'fp16'|'half' also accepted.");
-            Console.WriteLine("  --precision ushort  Qwen2.5 DEFAULT: BF16-on-disk, SIMD-widened to F32 at load");
-            Console.WriteLine("                     (bf16/fp16 are rejected for qwen; student training is always F32).");
+            Console.WriteLine("                    (bf16/fp16 are rejected for qwen; student training is always F32).");
             Console.WriteLine();
             Console.WriteLine("SIMD (narrow-float models):");
             Console.WriteLine("  --simd-widen      Enable widen-compute-narrow SIMD kernels for BFloat16/Half");
@@ -145,33 +131,23 @@ class Program
         bool fp16 = precision == "fp16";
         bool bf16 = precision == "bf16";
         bool isQwen = modelType == "qwen";
-        bool useUshort = precision == "ushort";
 
         if (isQwen && bf16)
         {
-            Console.Error.WriteLine("Qwen2.5 precision error: bf16 is not supported for the qwen mode. Use --precision f32 or --precision ushort (BF16-on-disk, widened to F32 at load).");
+            Console.Error.WriteLine("Qwen2.5 precision error: bf16 is not supported for the qwen mode. Use --precision f32 (BF16-on-disk, widened to F32 at load).");
             return 1;
         }
         if (isQwen && fp16)
         {
-            Console.Error.WriteLine("Qwen2.5 precision error: fp16 is not supported for the qwen mode. Use --precision f32 or --precision ushort (BF16-on-disk, widened to F32 at load).");
+            Console.Error.WriteLine("Qwen2.5 precision error: fp16 is not supported for the qwen mode. Use --precision f32 (BF16-on-disk, widened to F32 at load).");
             return 1;
         }
 
         Console.WriteLine($"Loading weights ({precision}) from {Path.GetFileName(modelPath)}...");
         var loadSw = Stopwatch.StartNew();
-        Dictionary<string, (float[] Data, int[] Shape)> tensors;
-        if (useUshort && isQwen)
-        {
-            var ushortWeights = SafeTensorsLoader.ReadUInt16(modelPath);
-            tensors = SafeTensorsLoader.WidenToF32(ushortWeights);
-        }
-        else
-        {
-            tensors = SafeTensorsLoader.Read(modelPath);
-        }
+        var tensors = SafeTensorsLoader.Read(modelPath);
         loadSw.Stop();
-        Console.WriteLine($"  SafeTensors parse ({(useUshort && isQwen ? "BF16->F32 widen" : "F32")}): {loadSw.ElapsedMilliseconds} ms ({tensors.Count} tensors)");
+        Console.WriteLine($"  SafeTensors parse (F32): {loadSw.ElapsedMilliseconds} ms ({tensors.Count} tensors)");
         Console.WriteLine();
 
         Dictionary<string, (BFloat16[] Data, int[] Shape)> tensorsBf16 = null!;

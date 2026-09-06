@@ -49,54 +49,9 @@ public static class SafeTensorsLoader
     }
 
     /// <summary>
-    /// Loads a safetensors file whose tensors are stored in BF16, returning the raw
-    /// 16-bit patterns as <see cref="ushort"/> arrays. BF16 extends float32 with a
-    /// zeroed low mantissa, so the shift of an element left by 16 reconstructs its
-    /// exact float value — this read keeps the compact on-disk size (half of
-    /// <see cref="Read{T}(string)"/> for F32) and defers translation to
-    /// <see cref="WidenBf16ToF32"/> / <see cref="WidenToF32"/>.
-    /// </summary>
-    /// <remarks>
-    /// BF16-only by design: F16/F32/I32/I64 tensors are rejected with a clear error
-    /// so the returned <c>ushort</c> patterns are always widenable via the BF16 rule.
-    /// Translation happens once at load time (mirroring the existing F16→F32
-    /// upcast), never during inference.
-    /// </remarks>
-    public static Dictionary<string, (ushort[] Data, int[] Shape)> ReadUInt16(string path)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        if (!File.Exists(path))
-            throw new FileNotFoundException($"SafeTensors file not found: {path}", path);
-
-        return ReadUInt16(File.ReadAllBytes(path));
-    }
-
-    public static Dictionary<string, (ushort[] Data, int[] Shape)> ReadUInt16(byte[] bytes)
-    {
-        var entries = ParseHeader(bytes, out int dataOffset);
-        var dataBuffer = bytes.AsSpan(dataOffset);
-        var result = new Dictionary<string, (ushort[] Data, int[] Shape)>(StringComparer.Ordinal);
-
-        foreach (var (name, dtype, shape, begin, end) in entries)
-        {
-            if (dtype != "BF16")
-                throw new NotSupportedException(
-                    $"Tensor '{name}' has dtype '{dtype}'; ReadUInt16 keeps raw BF16 patterns and only supports BF16. " +
-                    "Use Read<T> (float/Half/BFloat16/double) for load-time translation of F16/F32/I32/I64.");
-
-            ReadOnlySpan<byte> tensorBytes = dataBuffer.Slice(begin, end - begin);
-            ushort[] data = MemoryMarshal.Cast<byte, ushort>(tensorBytes).ToArray();
-
-            result[name] = (data, shape);
-        }
-
-        return result;
-    }
-
-    /// <summary>
-    /// Widens raw BF16 patterns (loaded via <see cref="ReadUInt16(string)"/>) to float32, once, at load time.
-    /// BF16 is the high 16 bits of float32, so the widening is a pure left-shift by 16 of the bit pattern —
-    /// SIMD-over <see cref="Vector{ushort}"/> (hardware-accelerated) via WidenLower/Upper + shift, with a
+    /// Widens raw BF16 bit patterns to float32. BF16 is the high 16 bits of float32, so the
+    /// widening is a pure left-shift by 16 of the bit pattern — SIMD-over
+    /// <see cref="Vector{ushort}"/> (hardware-accelerated) via WidenLower/Upper + shift, with a
     /// scalar tail for the remainder. Element count must match.
     /// </summary>
     public static void WidenBf16ToF32(ReadOnlySpan<ushort> source, Span<float> destination)
@@ -127,23 +82,6 @@ public static class SafeTensorsLoader
 
         for (; i < source.Length; i++)
             destination[i] = BitConverter.UInt32BitsToSingle((uint)source[i] << 16);
-    }
-
-    /// <summary>
-    /// Translates a raw-BF16 dictionary (from <see cref="ReadUInt16(string)"/>) into its float32 form —
-    /// the load-time equivalent of <see cref="Read{T}(string)"/> for the F32 target. Shapes are preserved.
-    /// </summary>
-    public static Dictionary<string, (float[] Data, int[] Shape)> WidenToF32(
-        IReadOnlyDictionary<string, (ushort[] Data, int[] Shape)> raw)
-    {
-        var result = new Dictionary<string, (float[] Data, int[] Shape)>(raw.Count, StringComparer.Ordinal);
-        foreach (var (name, tensor) in raw)
-        {
-            var widened = new float[tensor.Data.Length];
-            WidenBf16ToF32(tensor.Data, widened);
-            result[name] = (widened, tensor.Shape);
-        }
-        return result;
     }
 
     static (string Name, string Dtype, int[] Shape, int Begin, int End)[] ParseHeader(byte[] bytes, out int dataOffset)
