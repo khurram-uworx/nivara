@@ -9,12 +9,11 @@ using System.Text;
 namespace Nivara.Tests.AutoDiff;
 
 /// <summary>
-/// Kernel + read-path verification for the BF16 raw-<c>ushort</c> loader support
-/// (<c>SafeTensorsLoader.ReadUInt16</c> / <c>WidenBf16ToF32</c> / <c>WidenToF32</c>).
-/// The SIMD widening must be bit-exact against the scalar BF16→F32 rule
-/// (<c>float bits = ushortBits &lt;&lt; 16</c>) for every possible 16-bit pattern, and the
-/// raw read path must reproduce the same tensors as the existing F32 read of the
-/// real Qwen checkpoint (skipped when the model files are absent).
+/// Kernel + read-path verification for the BF16→F32 loader. The SIMD widening must be
+/// bit-exact against the scalar BF16→F32 rule (<c>float bits = ushortBits &lt;&lt; 16</c>) for
+/// every possible 16-bit pattern, and the fused <c>SafeTensorsLoader.Read&lt;float&gt;</c> read
+/// must reproduce the same tensors from a real BF16 checkpoint (skipped when the model
+/// files are absent).
 /// </summary>
 [TestFixture]
 public class SafeTensorsLoaderBf16Tests
@@ -78,90 +77,50 @@ public class SafeTensorsLoaderBf16Tests
     }
 
     [Test]
-    public void ReadUInt16_RawPatternsWidenToSameF32AsReadFloat()
+    public void ReadFloat_OnBf16Fixture_MatchesScalarReference()
     {
         (byte[] file, string[] tensorNames) = BuildBf16Fixture();
 
-        var raw = SafeTensorsLoader.ReadUInt16(file);
-        var widened = SafeTensorsLoader.WidenToF32(raw);
         var direct = SafeTensorsLoader.Read<float>(file);
 
-        Assert.That(widened.Keys, Is.EquivalentTo(raw.Keys));
-        Assert.That(widened.Keys, Is.EquivalentTo(direct.Keys));
+        Assert.That(direct.Keys, Is.EquivalentTo(tensorNames));
         foreach (var name in tensorNames)
         {
-            Assert.That(widened[name].Shape, Is.EqualTo(direct[name].Shape), $"{name}: shape");
-            Assert.That(widened[name].Data, Is.EqualTo(direct[name].Data), $"{name}: values (ushort→F32 must equal Read<float>)");
+            // Fused Read<float> must produce the scalar BF16->F32 widen (left-shift by 16) elementwise.
+            var expected = BuildBf16ScalarF32(name);
+            Assert.That(direct[name].Data, Is.EqualTo(expected), $"{name}: fused BF16->F32 must match the scalar reference");
         }
     }
 
     [Test]
-    public void ReadUInt16_RejectsNonBf16Dtypes()
-    {
-        // A single F32 tensor must be rejected by the raw-ushort path.
-        var header = "{\"t\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]},\"__metadata__\":{}}";
-        var headerLen = (uint)Encoding.UTF8.GetByteCount(header);
-        var bytes = new byte[8 + headerLen + 8];
-        BinaryPrimitives.WriteUInt64LittleEndian(bytes, headerLen);
-        Encoding.UTF8.GetBytes(header, bytes.AsSpan(8, (int)headerLen));
-        BinaryPrimitives.WriteSingleLittleEndian(bytes.AsSpan(8 + (int)headerLen), 1f);
-        BinaryPrimitives.WriteSingleLittleEndian(bytes.AsSpan(8 + (int)headerLen + 4), 2f);
-
-        var ex = Assert.Throws<NotSupportedException>(() => SafeTensorsLoader.ReadUInt16(bytes));
-
-        Assert.That(ex!.Message, Does.Contain("t").And.Contain("F32"));
-    }
-
-    [Test]
-    public void ReadUInt16_OnQwenCheckpoint_MatchesReadFloatKeysAndShapes()
+    public void ReadFloat_OnQwenCheckpoint_LoadsAll290TensorsWithExpectedShapes()
     {
         var safetensors = Path.Combine(ModelDir, "model.safetensors");
         if (!File.Exists(safetensors))
-            Assert.Ignore("Qwen safetensors absent; skipping raw-BF16 checkpoint verification.");
+            Assert.Ignore("Qwen safetensors absent; skipping fused BF16->F32 checkpoint verification.");
 
         var stopwatch = Stopwatch.StartNew();
-        var raw = SafeTensorsLoader.ReadUInt16(safetensors);
-        stopwatch.Stop();
-        long rawMs = stopwatch.ElapsedMilliseconds;
-        long rawBytes = raw.Sum(t => (long)t.Value.Data.Length * sizeof(ushort));
-
-        stopwatch.Restart();
         var direct = SafeTensorsLoader.Read<float>(safetensors);
         stopwatch.Stop();
-        long floatMs = stopwatch.ElapsedMilliseconds;
 
-        // Structural parity: same tensor set, same shapes, raw read holds half the bytes.
-        Assert.That(raw.Keys, Is.EquivalentTo(direct.Keys));
-        Assert.That(raw.Count, Is.EqualTo(direct.Count));
-        foreach (var name in raw.Keys)
-            Assert.That(raw[name].Shape, Is.EqualTo(direct[name].Shape), $"{name}: shape mismatch");
-
-        // Spot shape checks against Qwen2.5-0.5B config values.
-        Assert.That(raw["model.embed_tokens.weight"].Shape, Is.EqualTo(new[] { 151936, 896 }));
-        Assert.That(raw["model.norm.weight"].Shape, Is.EqualTo(new[] { 896 }));
-        Assert.That(raw["model.layers.0.self_attn.q_proj.weight"].Shape, Is.EqualTo(new[] { 896, 896 }));
-        Assert.That(raw["model.layers.0.self_attn.q_proj.bias"].Shape, Is.EqualTo(new[] { 896 }));
-        Assert.That(raw["model.layers.0.self_attn.v_proj.weight"].Shape, Is.EqualTo(new[] { 128, 896 }));
+        // Structural parity against Qwen2.5-0.5B config values.
+        Assert.That(direct.Count, Is.EqualTo(290));
+        Assert.That(direct["model.embed_tokens.weight"].Shape, Is.EqualTo(new[] { 151936, 896 }));
+        Assert.That(direct["model.norm.weight"].Shape, Is.EqualTo(new[] { 896 }));
+        Assert.That(direct["model.layers.0.self_attn.q_proj.weight"].Shape, Is.EqualTo(new[] { 896, 896 }));
+        Assert.That(direct["model.layers.0.self_attn.q_proj.bias"].Shape, Is.EqualTo(new[] { 896 }));
+        Assert.That(direct["model.layers.0.self_attn.v_proj.weight"].Shape, Is.EqualTo(new[] { 128, 896 }));
 
         TestContext.Out.WriteLine(
-            $"Qwen BF16 load: ReadUInt16 {rawMs} ms ({rawBytes / (1024.0 * 1024.0):F0} MB targets) vs Read<float> {floatMs} ms " +
-            $"(half the byte payload, same tensors).");
+            $"Qwen BF16 load: Read<float> (fused) {stopwatch.ElapsedMilliseconds} ms ({direct.Count} tensors).");
     }
 
     /// <summary>Builds a small, valid safetensors BF16 file with three tensors (mixed ranks).</summary>
-    static (byte[] File, string[] Names) BuildBf16Fixture()
-    {
-        // weights: 2×2 matrix + 2×1 bias + 1×3 vector, all as raw BF16 ushort patterns.
-        var weightP = new ushort[] { 0x3F80, 0x4000, 0xC000, 0x3F00 }; // 1, 2, -2, 0.5
-        var biasP = new ushort[] { 0xBF80, 0x3F80 };                  // -1, 1
-        var vecP = new ushort[] { 0x0000, 0x7F80, 0x7FC0 };           // 0, +inf, NaN
+    static (byte[] File, string[] Names) BuildBf16Fixture() => BuildBf16Fixture(BuildBf16Sections());
 
-        var sections = new (string Name, int[] Shape, ushort[] Patterns)[]
-        {
-            ("w", new[] { 2, 2 }, weightP),
-            ("b", new[] { 2 }, biasP),
-            ("v", new[] { 3 }, vecP),
-        };
+    static (byte[] File, string[] Names) BuildBf16Fixture(
+        (string Name, int[] Shape, ushort[] Patterns)[] sections)
+    {
         var names = sections.Select(s => s.Name).ToArray();
 
         int offset = 0;
@@ -191,5 +150,30 @@ public class SafeTensorsLoaderBf16Tests
         }
 
         return (file, names);
+    }
+
+    /// <summary>Shared 3-tensor BF16 fixture (weights, bias, vector) with raw ushort patterns.</summary>
+    static (string Name, int[] Shape, ushort[] Patterns)[] BuildBf16Sections()
+    {
+        var weightP = new ushort[] { 0x3F80, 0x4000, 0xC000, 0x3F00 }; // 1, 2, -2, 0.5
+        var biasP = new ushort[] { 0xBF80, 0x3F80 };                  // -1, 1
+        var vecP = new ushort[] { 0x0000, 0x7F80, 0x7FC0 };           // 0, +inf, NaN
+
+        return new (string Name, int[] Shape, ushort[] Patterns)[]
+        {
+            ("w", new[] { 2, 2 }, weightP),
+            ("b", new[] { 2 }, biasP),
+            ("v", new[] { 3 }, vecP),
+        };
+    }
+
+    /// <summary>Scalar BF16→F32 reference for a named fixture tensor (float bits = ushort &lt;&lt; 16).</summary>
+    static float[] BuildBf16ScalarF32(string name)
+    {
+        var patterns = BuildBf16Sections().First(s => s.Name == name).Patterns;
+        var result = new float[patterns.Length];
+        for (int i = 0; i < patterns.Length; i++)
+            result[i] = BitConverter.UInt32BitsToSingle((uint)patterns[i] << 16);
+        return result;
     }
 }

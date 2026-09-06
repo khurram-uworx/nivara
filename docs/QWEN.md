@@ -36,8 +36,7 @@ anchor the fuller technical detail and are cross-linked throughout:
 
 ```
 config.json + model.safetensors + vocab.json + merges.txt + tokenizer.json
-  → SafeTensorsLoader.ReadUInt16      (BF16-on-disk → raw ushort[], #388)
-  → WidenBf16ToF32 (SIMD Vector<ushort>)  → F32
+  → SafeTensorsLoader.Read<T> (BF16-on-disk, fused SIMD WidenBf16ToF32 → F32, #388)
   → LlamaLoader.Load + LlamaConfig.FromJson → LlamaForCausalLM<T>
   → Gpt2BpeTokenizer  (Qwen Split-regex pretokenizer + added tokens)
 ```
@@ -49,9 +48,11 @@ config.json + model.safetensors + vocab.json + merges.txt + tokenizer.json
 > BCL path that is radically slower than F32 SIMD, while the widen is **lossless**
 > (BF16 *is* the top 16 bits of float32) and costs only a one-time pass. This is
 > Nivara's current recommendation; its full rationale, the A/B numbers, and the
-> `ReadUInt16`/`WidenBf16ToF32` mechanics live in **[`docs/BFLOAT16.md`](BFLOAT16.md)**.
-> When `Vector<BFloat16>` SIMD support lands in the runtime this tradeoff is worth
-> revisiting (#387, #388, **#391**).
+> `WidenBf16ToF32` mechanics live in **[`docs/BFLOAT16.md`](BFLOAT16.md)**.
+> The widen is fused into the read: `Read<float>` runs the SIMD kernel directly
+> into each tensor's `float[]` with **no interim `ushort[]`** (one pass, ~1 GB less
+> peak memory). When `Vector<BFloat16>` SIMD support lands in the runtime this
+> tradeoff is worth revisiting (#387, #388, **#391**).
 
 Qwen's config is Llama-loader-compatible: `hidden 896`, 24 layers, **GQA 14↔2**
 KV heads, SiLU gated FFN, `RMSNorm` (ε=1e-6), **RoPE θ=1_000_000** (10× SmolLM),
@@ -67,7 +68,7 @@ everything else reused the SmolLM machinery unchanged (`LlamaLoader`,
 | Piece | Location | Notes |
 |---|---|---|
 | `qkvBias` flag on `LlamaCausalAttention<T>` / `LlamaDecoderBlock<T>` | **core** `src/Nivara/AutoDiff/Nn/` | the one additive core change (#384); default `false`, SmolLM unchanged |
-| `SafeTensorsLoader.ReadUInt16` + SIMD `WidenBf16ToF32` | **core** | #388; ~2.5× faster / half the RAM vs `Read<float>`, lossless BF16→F32 |
+| `SafeTensorsLoader.Read<float>` fused BF16→F32 (SIMD `WidenBf16ToF32`) | **sample** `samples/Nivara.Samples/` | #388; BF16 widen fused into the read, no interim `ushort[]`, ~1 GB less peak memory |
 | `LlamaForCausalLM<T>`, `LlamaConfig`, `LlamaLoader`, `StateDictLoader` | **sample** `samples/Nivara.Samples/` | Qwen loads via the same route SmolLM uses |
 | `Gpt2BpeTokenizer` Qwen preamble | **sample** `samples/Nivara.Samples/` | `Split`-regex pretokenize + added-token merge |
 | `LlamaKVCache<T>` + `ForwardCached` | **sample** | per-token KV-cached decode |
@@ -328,22 +329,23 @@ streaming modes with the same generation core.
 
 ### BF16 loader gap + benchmark (`SafeTensorsLoaderBf16Tests`, #388)
 
-- New `SafeTensorsLoader.ReadUInt16(path)` reads a BF16 checkpoint's raw 16-bit
-  patterns (half the byte payload of `Read<float>`), with
-  `WidenBf16ToF32(ReadOnlySpan<ushort>, Span<float>)` widening via a
-  `Vector<ushort>` SIMD chain (`Vector.Widen` → `<<16` → reinterpret); the scalar
-  tail handles partial vectors. All 65,536 BF16 patterns property-match the
-  scalar reference (`WidenBf16ToF32_AllBitPatterns_MatchesScalarReference`).
-- **Qwen checkpoint load benchmark** (988 MB BF16, on this machine):
-
-  | Path | Time | Payload |
-  |---|---|---|
-  | `ReadUInt16` + SIMD widen | **~0.70–0.72 s** | 942 MB ushort targets |
-  | `Read<float>` (BF16→F32 per element) | **~1.74–1.96 s** | ~1.88 GB F32 targets |
-
-  ≈**2.5× faster, half the RAM footprint**, with identical F32 inference
-  numerics (widening is lossless — BF16 is the high 16 bits of float32).
-- `ReadUInt16` rejects non-BF16 dtypes with a clear `NotSupportedException`.
+- **Single fused load**: `SafeTensorsLoader.Read<float>(path)` reads a BF16
+  checkpoint and widens directly into each tensor's `float[]` via
+  `WidenBf16ToF32(ReadOnlySpan<ushort>, Span<float>)` — a `Vector<ushort>` SIMD chain
+  (`Vector.Widen` → `<<16` → reinterpret) with a scalar tail for partial vectors,
+  run **during the read** with **no interim `ushort[]`** (one pass). All 65,536 BF16
+  patterns property-match the scalar reference
+  (`WidenBf16ToF32_AllBitPatterns_MatchesScalarReference`).
+- **Qwen checkpoint load** (988 MB BF16, on this machine, Release): the fused
+  `Read<float>` finishes in roughly **0.7–2.2 s** (median ~0.8 s warm; the OS file
+  cache drives the spread) — it **does not regress** the earlier two-step path
+  (2.07–2.16 s) and drops **~1 GB of peak memory** by never materializing the
+  interim `ushort[]` (989 MB `byte[]` + 1.88 GB F32 stays; the 942 MB `ushort[]`
+  is gone). Earlier docs claimed the two-step was "~2.5× faster / half the RAM",
+  but that compared a half-size `ushort[]` output (no widen) against a full-size
+  `float[]` output (with widen) — a meaningless apples-to-oranges metric, since
+  both paths end at F32. With the widen fused in at equal F32 output, the two-step
+  offered no timing or memory win and was removed (#388).
 
 ### Qwen tool-calling (this work, 12 new tests)
 

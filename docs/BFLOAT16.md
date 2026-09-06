@@ -256,24 +256,27 @@ fully available and exercised by the sample's `bf16` mode. Flipping the default
 to track the on-disk dtype would break the `float[]` API contract the F32 model
 builders depend on.
 
-### Raw BF16 read path (`ReadUInt16`) + SIMD widening
+### Fused BF16 read path (`Read<float>`) + SIMD widening
 
-For BF16 checkpoints that only ask for F32 inference later, the loader exposes a
-faster load that keeps the lossless raw source:
+For BF16 checkpoints that ask for F32 inference, the loader fuses the lossless
+BF16→F32 widen directly into the read — never materializing an interim `ushort[]`:
 
-- `SafeTensorsLoader.ReadUInt16(path)` parses the header and returns each tensor
-  as `ushort[]` — the raw BF16 patterns *are* the target `ushort` values, so the
-  read holds **half the byte payload** of `Read<float>` and needs no per-element
-  conversion. Non-BF16 dtypes throw `NotSupportedException`.
-- `WidenBf16ToF32(ReadOnlySpan<ushort>, Span<float>)` widens the patterns to F32
-  in a `Vector<ushort>` SIMD chain (`Vector.Widen` → `<<16` → bit-reinterpret),
-  with a scalar tail. It property-matches the scalar reference for **all 65,536**
-  BF16 patterns; `ConvertBF16<float>` routes through it, so the existing F32 read
-  path is SIMD for free.
-- Benchmark on the Qwen2.5-0.5B checkpoint (988 MB BF16, F32-target load):
-  `ReadUInt16` ≈ **0.70–0.72 s** vs `Read<float>` ≈ **1.74–1.96 s** (~2.5×) at
-  half the memory, with identical F32 inference numerics (widening is lossless —
-  BF16 is the high 16 bits of float32).
+- `SafeTensorsLoader.Read<float>(path)` parses the header and, for each BF16
+  tensor, widens the raw 16-bit patterns straight into the destination `float[]`
+  via `WidenBf16ToF32(ReadOnlySpan<ushort>, Span<float>)` — a `Vector<ushort>`
+  SIMD chain (`Vector.Widen` → `<<16` → bit-reinterpret) with a scalar tail. It
+  property-matches the scalar reference for **all 65,536** BF16 patterns;
+  `ConvertBF16<float>` routes through the same kernel, so the F32 read path is
+  SIMD for free (one pass, no interim `ushort[]`, ~1 GB less peak memory than a
+  two-step raw read + widen).
+- The Qwen2.5-0.5B checkpoint (988 MB BF16, F32-target load) loads in roughly
+  **0.7–2.2 s** on this machine (Release; the OS file cache drives the spread) —
+  **no regression** vs the earlier two-step, with identical F32 inference numerics
+  (widening is lossless — BF16 is the high 16 bits of float32). The two-step's
+  documented "~2.5× faster / half the memory" claim was an apples-to-oranges
+  comparison (half-size `ushort[]` output with no widen vs full-size `float[]`
+  with widen); at equal F32 output the two-step offered nothing and was removed
+  (#388).
 
 See `docs/QWEN.md` (Phase 2.5) and
 `SafeTensorsLoaderBf16Tests` for the full context.

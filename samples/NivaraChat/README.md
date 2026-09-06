@@ -380,7 +380,7 @@ config.json + model.safetensors + vocab.json + merges.txt + tokenizer.json
 - `--qwen tools-weather --text "What's the weather in Paris?"` — the native tool-calling demo: the model emits `<tool_call>\n{"name": "getWeather", "arguments": {"city": "Paris"}}\n</tool_call>`, the `GetWeather` `AIFunction` runs, the result feeds back as `<tool_response>` inside a `user` turn, and the model closes with a clean natural-language answer (loop capped at 3 iterations so a model that never answers still exits cleanly). Interactive REPL when `--text` is omitted.
 - `--qwen chat` / `--qwen plain` — interactive multi-turn REPL / single-shot plain-text reply, token-streamed.
 
-Options after `--qwen`: `tools-weather|chat|plain` sub-mode, `--model-dir <path>` (default `samples/data/qwen2.5-0.5b-instruct`), `--precision f32|bf16` (default `f32`; bf16 keeps BF16 weights and widens via the SIMD `WidenBf16ToF32` path), `--max-new-tokens <n>` (default 128), `--text <string>`, `--temperature <t>` (0 = greedy, >0 = sampling), `--top-p <p>` (nucleus cutoff, 0–1, default 1), `--seed <n>` (RNG seed), `--kv-cache` / `--no-kv-cache` (default: cached). Run `--qwen --help` for the full list.
+Options after `--qwen`: `tools-weather|chat|plain` sub-mode, `--model-dir <path>` (default `samples/data/qwen2.5-0.5b-instruct`), `--precision f32|bf16` (default `f32`; bf16 keeps the BF16 weights native — BF16-on-disk is read as BFloat16 with no widen), `--max-new-tokens <n>` (default 128), `--text <string>`, `--temperature <t>` (0 = greedy, >0 = sampling), `--top-p <p>` (nucleus cutoff, 0–1, default 1), `--seed <n>` (RNG seed), `--kv-cache` / `--no-kv-cache` (default: cached). Run `--qwen --help` for the full list.
 
 Model files must be present under `samples/data/qwen2.5-0.5b-instruct`:
 
@@ -398,7 +398,7 @@ Tested examples:
 Ground truth, the format findings, the BF16 loader benchmark, and the PyTorch
 parity evidence live in `docs/QWEN.md`.
 
-Uses: `LlamaForCausalLM<T>`, `LlamaLoader.Load`, `LlamaKVCache<T>`, `SafeTensorsLoader.Read<T>` / `ReadUInt16` + `WidenBf16ToF32`, `Gpt2BpeTokenizer` (Qwen Split-regex pretokenization), `QwenChatClient<T>` (`IChatClient`), `QwenChatTemplate` (byte-exact renderer), `QwenToolCallParser` (`<tool_call>` → `FunctionCallContent`), `FunctionInvokingChatClient` (MEAI tool loop), `AIFunctionFactory` (`GetWeather`).
+Uses: `LlamaForCausalLM<T>`, `LlamaLoader.Load`, `LlamaKVCache<T>`, `SafeTensorsLoader.Read<T>` (`Read<float>` fused BF16→F32 at load), `Gpt2BpeTokenizer` (Qwen Split-regex pretokenization), `QwenChatClient<T>` (`IChatClient`), `QwenChatTemplate` (byte-exact renderer), `QwenToolCallParser` (`<tool_call>` → `FunctionCallContent`), `FunctionInvokingChatClient` (MEAI tool loop), `AIFunctionFactory` (`GetWeather`).
 
 ## Agents pipeline architecture
 

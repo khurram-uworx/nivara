@@ -397,15 +397,15 @@ dotnet run --project samples/NivaraInference -c Release -- qwen distill --force
 
 # Decode benchmark: median-of-3 tool-call turns, KV-cached vs full re-forward
 dotnet run --project samples/NivaraInference -c Release -- qwen benchmark
-# (--ushort is now the qwen default; explicit --precision f32 opts into the f32 load)
+# (qwen default load is the fused BF16->F32 read; --precision f32 is equivalent)
 ```
 
-**Precision**: `ushort` is the **default** for `qwen` — the checkpoint is
-BF16-on-disk, read raw via `SafeTensorsLoader.ReadUInt16` and widened to F32
-with the SIMD `WidenBf16ToF32` kernel (numerically identical weights; the
-989 MB checkpoint loads in ~2.2 s on this machine in Release). `f32` stays
-available opt-in via `--precision f32`. `bf16`/`fp16` are rejected for `qwen`
-with a clear error (the generation loop is F32).
+**Precision**: `f32` is the **default** for `qwen` — the checkpoint is
+BF16-on-disk and the load **fuses** the SIMD `WidenBf16ToF32` widen directly into
+each tensor's `float[]` (numerically identical weights; no interim `ushort[]`).
+The 989 MB checkpoint loads in ~0.7–2.2 s on this machine in Release (OS file
+cache drives the spread; median ~0.8 s warm). `bf16`/`fp16` are rejected for
+`qwen` with a clear error (the generation loop is F32).
 
 **Tools fixture diff** (run automatically when the checkpoint dir has the
 reference files; `qwen_tool_*.txt`/`.bin` generated once by
@@ -442,10 +442,11 @@ as SmolLM).
   renderer/byte-parity bug found during acceptance: the hand-rolled tool JSON
   opened 4 objects but closed only 3, so the prompt tokenized 205 vs the
   fixture's 206 — fixed to `}}}`.)
-- **`SafeTensorsLoader.ReadUInt16` + SIMD `WidenBf16ToF32`**: the default
-  load reads the BF16-on-disk weights as raw `ushort` and widens with
-  vectorized `TensorPrimitives` — the natural read for a BF16 checkpoint
-  (~2.2 s for the 989 MB file on this machine in Release).
+- **`SafeTensorsLoader.Read<float>` fused BF16→F32 (`WidenBf16ToF32`)**: the default
+  load reads the BF16-on-disk weights and SIMD-widens them straight into each
+  tensor's `float[]` via the vectorized `TensorPrimitives` kernel — no interim
+  `ushort[]` (a one-pass read, ~1 GB less peak memory than the previous two-step;
+  ~0.7–2.2 s for the 989 MB file on this machine in Release).
 - **`LlamaLoader` qkvBias auto-detect**: presence of
   `model.layers.0.self_attn.q_proj.bias` flips the attention to biased
   projections (no manual flag).
@@ -454,16 +455,16 @@ as SmolLM).
 `RotaryEmbedding<T>` `rotate_half` RoPE (only `theta` differs: 1e6), GQA
 14↔2 KV-repeat (`GqaRepeatKV`), `RMSNorm<T>`, SiLU gated FFN, tied LM head,
 `LlamaForCausalLM<T>`/`LlamaLoader`. **Out of scope**: fp16/bf16 compute for
-qwen (rejected with a clear error), promoting `ReadUInt16`/the Split-regex
+qwen (rejected with a clear error), promoting the fused load / the Split-regex
 tokenizer into `src/Nivara`, GGUF loading (Phase 5).
 
 #### Results / benchmarks
 
 | Run | Date | Result |
 |---|---|---|
-| `qwen tools` (default ushort load) | 2026-09-06 | tool-call turn: 19 tok, 173,900 ms (~9,153 ms/tok cached); final turn: 25 tok, 227,800 ms; fixture ids MATCH (206/258), 19/19 generated ids (Release) |
+| `qwen tools` (default fused load) | 2026-09-06 | tool-call turn: 19 tok, 173,900 ms (~9,153 ms/tok cached); final turn: 25 tok, 227,800 ms; fixture ids MATCH (206/258), 19/19 generated ids (Release) |
 | `qwen benchmark` | 2026-09-06 | KV cache median 189,150 ms vs full re-forward 204,385 ms (19 tok) → 1.1× (Debug build; Release run failed mid-decode — #386 will provide fresh numbers) |
-| Load parse (ushort, default) | 2026-09-06 | 2,159 ms (Release; 290 tensors, 989 MB BF16-on-disk) |
+| Load parse (fused, default) | 2026-09-06 | ~0.8 s median (0.7–2.2 s; Release; 290 tensors, 989 MB BF16-on-disk) — no regression vs the removed two-step (2.07–2.16 s) |
 
 **Why the KV speedup is small here**: the tool prompt is 206 tokens and the
 generated turn just 19, so the cache-free path re-feeds only a slightly
@@ -476,16 +477,16 @@ logical processors, .NET 11.0.0, Release build):
 
 | Load precision | Load parse | KV-cached per-token | Full re-forward per-token | Speedup |
 |---|---|---|---|---|
-| ushort (default; BF16→F32 SIMD widen) | 2,159 ms | 9,153 ms/tok (Release) | 10,757 ms/tok (Debug) | — (see note) |
+| f32 default (fused BF16→F32 SIMD widen) | ~0.8 s median (0.7–2.2 s) | 9,153 ms/tok (Release) | 10,757 ms/tok (Debug) | — (see note) |
 
-<sup>Load parse and the KV-cached per-token figure are Release-build (2026-09-06,
-`qwen tools`): tool-call turn 19 tok / 173.9 s. The full re-forward per-token and the
-1.1× KV speedup are Debug-era (benchmark chain). The Release benchmark run failed
-mid-decode and will be refreshed via the dedicated-machine cycle (issue #386), when
-both decode paths are re-measured in the same Release build for a clean speedup ratio.
-The f32 opt-in route is not re-timed (per the default-ushort decision) — it widens
-the same BF16-on-disk weights to identical F32 tensors, so decode timing and numerics
-are shared; only the start-up read differs.</sup>
+<sup>Load parse is the fused `Read<float>` (Release build, 2026-09-06, `qwen tools`):
+the 989 MB BF16-on-disk file SIMD-widens straight into `float[]` with no interim
+`ushort[]` (one pass, ~1 GB less peak memory than the previous two-step). The
+spread is OS file-cache state. The KV-cached per-token figure is Release; the
+full re-forward per-token and the 1.1× KV speedup are Debug-era (benchmark chain).
+The Release benchmark run failed mid-decode and will be refreshed via the
+dedicated-machine cycle (issue #386), when both decode paths are re-measured in
+the same Release build for a clean speedup ratio.</sup>
 
 **Distill eval** (`qwen distill --teacher-examples 3`, 2026-09-06, Release
 build; accuracy over the 8 shared SST-2 eval sentences, teacher labels via
@@ -518,7 +519,7 @@ Each model defines a static `LoadWeights()` factory that maps HuggingFace tensor
 - **DistilBERT**: 105 tensors mapped via `DistilBertLoader.LoadEncoderWeights` from `distilbert.embeddings.*` and `distilbert.transformer.layer.{0-5}.*` keys
 - **DistilBERT SST-2**: 104 tensors — 102 encoder tensors via `DistilBertLoader.LoadEncoderWeights` + `pre_classifier.{weight,bias}` and `classifier.{weight,bias}` loaded via `DistilBertForSequenceClassification<T>.LoadWeights`
 - **SmolLM-135M**: 272 tensors (all BF16 on disk) via `LlamaLoader.Load<TModel,TWeight>` + `LlamaConfig.FromJson` — maps `model.embed_tokens.weight` (reused for the tied LM head), `model.layers.N.*` (input_layernorm, self_attn.{q,k,v,o}_proj, post_attention_layernorm, mlp.{gate,up,down}_proj), and `model.norm.weight`, with RMSNorm/attention/MLP weights bound via `StateDictLoader.LoadRMSNorm`/`LoadLinear`
-- **Qwen2.5-0.5B-Instruct**: 290 tensors (BF16 on disk, read raw via `ReadUInt16` + widened to F32) via the same `LlamaLoader` route, plus the biased attention arms — `model.layers.N.self_attn.{q,k,v}_proj.bias` (auto-detected from `model.layers.0.self_attn.q_proj.bias`), RoPE `theta=1_000_000`, GQA 14↔2
+- **Qwen2.5-0.5B-Instruct**: 290 tensors (BF16 on disk, fused SIMD-widened to F32 at load via `Read<float>`) via the same `LlamaLoader` route, plus the biased attention arms — `model.layers.N.self_attn.{q,k,v}_proj.bias` (auto-detected from `model.layers.0.self_attn.q_proj.bias`), RoPE `theta=1_000_000`, GQA 14↔2
 
 ## Narrow-precision inference (BFloat16 / Half)
 
@@ -839,7 +840,7 @@ AutoDiff graph nodes are only created inside `GradientUtils.Grad()` scopes (used
 | `LlamaForCausalLM<T>` greedy decode (inference-default) | Tool-call turn (19 tok) + answer turn, no `GradientUtils.Grad()` scope |
 | Function-calling loop (`QwenToolParser` + `<tool_call>`/`<tool_response>`) | `getWeather` → tool result fed back → final answer |
 | `Gpt2BpeTokenizer` `Split`-regex pretokenizer + added tokens | Qwen tokenizer path (byte-verified against the HF fixture, 206/258 ids) |
-| `SafeTensorsLoader.ReadUInt16` + SIMD `WidenBf16ToF32` | Default ushort load (BF16-on-disk → F32, ~2.2 s Release) |
+| `SafeTensorsLoader.Read<float>` fused BF16→F32 (`WidenBf16ToF32`) | Default load (BF16-on-disk → F32, no interim `ushort[]`, ~0.8 s median Release) |
 | Teacher distillation inside `GradientUtils.Grad()` | `SentimentMLP` 200-epoch training + linear baseline vs DistilBERT SST-2 eval table |
 | FNV-1a word+bigram feature hashing (4096-dim BOW) | Student/linear input features from raw sentences |
 | Resumable label cache + `--force` | `qwen_distill_labels.json` merge/recompute |
