@@ -2,7 +2,6 @@ using Nivara.Samples;
 using NUnit.Framework;
 using System.Buffers.Binary;
 using System.Diagnostics;
-using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -13,7 +12,8 @@ namespace Nivara.Tests.AutoDiff;
 /// bit-exact against the scalar BF16→F32 rule (<c>float bits = ushortBits &lt;&lt; 16</c>) for
 /// every possible 16-bit pattern, and the fused <c>SafeTensorsLoader.Read&lt;float&gt;</c> read
 /// must reproduce the same tensors from a real BF16 checkpoint (skipped when the model
-/// files are absent).
+/// files are absent). The memory-mapped string-path load must match the in-memory
+/// <c>byte[]</c> load exactly.
 /// </summary>
 [TestFixture]
 public class SafeTensorsLoaderBf16Tests
@@ -113,6 +113,53 @@ public class SafeTensorsLoaderBf16Tests
 
         TestContext.Out.WriteLine(
             $"Qwen BF16 load: Read<float> (fused) {stopwatch.ElapsedMilliseconds} ms ({direct.Count} tensors).");
+    }
+
+    [Test]
+    public void ReadFloat_OnBf16FixtureFile_MatchesByteArrayPath()
+    {
+        // The string-path load is memory-mapped; it must produce bit-identical tensors to the
+        // in-memory byte[] load. This is the cheap, always-on regression gate for that path.
+        (byte[] fileBytes, string[] tensorNames) = BuildBf16Fixture();
+        string tempPath = Path.Combine(Path.GetTempPath(), $"nivara-bf16-{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            File.WriteAllBytes(tempPath, fileBytes);
+
+            var fromFile = SafeTensorsLoader.Read<float>(tempPath);
+            var fromBytes = SafeTensorsLoader.Read<float>(fileBytes);
+
+            Assert.That(fromFile.Keys, Is.EquivalentTo(tensorNames));
+            Assert.That(fromFile.Keys, Is.EquivalentTo(fromBytes.Keys));
+            foreach (var name in tensorNames)
+            {
+                Assert.That(fromFile[name].Shape, Is.EqualTo(fromBytes[name].Shape), $"{name}: shape");
+                Assert.That(fromFile[name].Data, Is.EqualTo(fromBytes[name].Data), $"{name}: values");
+            }
+        }
+        finally
+        {
+            File.Delete(tempPath);
+        }
+    }
+
+    [Test]
+    public void ReadFloat_OnQwenCheckpoint_MemoryMappedMatchesByteArrayPath()
+    {
+        var safetensors = Path.Combine(ModelDir, "model.safetensors");
+        if (!File.Exists(safetensors))
+            Assert.Ignore("Qwen safetensors absent; skipping memory-mapped vs byte[] parity verification.");
+
+        var mapped = SafeTensorsLoader.Read<float>(safetensors);            // memory-mapped path
+        var buffered = SafeTensorsLoader.Read(File.ReadAllBytes(safetensors)); // byte[] path
+
+        Assert.That(mapped.Count, Is.EqualTo(290));
+        Assert.That(mapped.Keys, Is.EquivalentTo(buffered.Keys));
+        foreach (var name in mapped.Keys)
+        {
+            Assert.That(mapped[name].Shape, Is.EqualTo(buffered[name].Shape), $"{name}: shape");
+            Assert.That(mapped[name].Data, Is.EqualTo(buffered[name].Data), $"{name}: values");
+        }
     }
 
     /// <summary>Builds a small, valid safetensors BF16 file with three tensors (mixed ranks).</summary>

@@ -41,6 +41,21 @@ dotnet run --project tests/Nivara.PerformanceTests -c Release
 tests/Nivara.PerformanceTests/bin/Release/net10.0/Nivara.PerformanceTests.exe
 ```
 
+### On-demand helper modes
+
+Two opt-in flags run standalone checks that are not part of the scenario table or the
+no-regression gate — reach for them while working on the relevant area instead of building
+a throwaway harness:
+
+- `--dataset-test` — DatasetGenerator determinism/row-count/field-range validator
+  (IncidentLab data sets).
+- `--safetensors-mmap [<path>]` — A/B of the safetensors string-path load (#392):
+  memory-mapped `SafeTensorsLoader.Read(path)` vs copy-into-`byte[]`
+  `SafeTensorsLoader.Read(File.ReadAllBytes(path))`. Reports per-load ms, sampled
+  managed-heap high-water (`GC.GetTotalMemory`), and retained-after-GC over 3 alternating
+  rounds. Defaults to `samples/data/qwen2.5-0.5b-instruct/model.safetensors` when no path
+  is given.
+
 ### No-regression gate (P4)
 
 The harness doubles as an executable perf gate (`ADR-002` P4). Two modes:

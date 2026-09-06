@@ -1,4 +1,3 @@
-using Microsoft.Extensions.AI;
 using NivaraChat.Qwen;
 using NUnit.Framework;
 

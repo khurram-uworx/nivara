@@ -204,6 +204,7 @@ How AI Assistant should use this file
 
 Testing & diagnostics patterns
 - Ask before running `dotnet test` or any long-running test/verification command; wait for explicit confirmation before starting it.
+- The `tests/` directory holds three projects: `Nivara.Tests` (NUnit 4.x unit tests), `Nivara.PerformanceTests` (standalone stopwatch harness — scenario rows + on-demand modes like `--safetensors-mmap <path>` and `--dataset-test`, no NUnit/BDN, `dotnet run -c Release`), and `Nivara.SimdProbe` (self-contained SIMD probe, `dotnet run -c Release -- correctness|benchmark`). Each non-NUnit project has its own `README.md`.
 - Avoid `[TestCase]` with null arrays; use regular `[Test]` with inline arrays.
 - For complex anonymous-type arrays, prefer explicit typed tests or separate focused tests per type.
 - Reflection cannot pass `Span<T>` via `MethodInfo.Invoke` — convert to array first.

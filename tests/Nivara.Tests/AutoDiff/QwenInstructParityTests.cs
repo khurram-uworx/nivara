@@ -2,7 +2,6 @@ using Nivara.AutoDiff;
 using Nivara.Samples;
 using NUnit.Framework;
 using System.Buffers.Binary;
-using System.Numerics;
 
 namespace Nivara.Tests.AutoDiff;
 

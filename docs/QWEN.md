@@ -337,15 +337,20 @@ streaming modes with the same generation core.
   patterns property-match the scalar reference
   (`WidenBf16ToF32_AllBitPatterns_MatchesScalarReference`).
 - **Qwen checkpoint load** (988 MB BF16, on this machine, Release): the fused
-  `Read<float>` finishes in roughly **0.7–2.2 s** (median ~0.8 s warm; the OS file
-  cache drives the spread) — it **does not regress** the earlier two-step path
-  (2.07–2.16 s) and drops **~1 GB of peak memory** by never materializing the
-  interim `ushort[]` (989 MB `byte[]` + 1.88 GB F32 stays; the 942 MB `ushort[]`
-  is gone). Earlier docs claimed the two-step was "~2.5× faster / half the RAM",
-  but that compared a half-size `ushort[]` output (no widen) against a full-size
-  `float[]` output (with widen) — a meaningless apples-to-oranges metric, since
-  both paths end at F32. With the widen fused in at equal F32 output, the two-step
-  offered no timing or memory win and was removed (#388).
+  `Read<float>` finishes in roughly **1.1–1.4 s** (median ~1.3 s warm [#392]) — it
+  does **not regress** the earlier two-step path (2.07–2.16 s [#388]) and its peak
+  **managed** memory drops ~1 GB in two steps: no interim `ushort[]` (#388) and no
+  full-file `byte[]` — the string-path read memory-maps the file and touches each
+  tensor's pages on demand (#392). Peak managed heap: **2.83 GB → 1.88 GB**
+  (measured A/B). The mmap read is ~1.6× slower than a warm `ReadAllBytes` copy
+  (per-page soft-fault overhead for random per-tensor access), so the managed-heap
+  saving trades ~0.5 s on the one-time model load; physical working set is similar
+  either way (the OS page cache holds the file either way). Earlier docs claimed the
+  two-step was "~2.5× faster / half the RAM", but that compared a half-size
+  `ushort[]` output (no widen) against a full-size `float[]` output (with widen) —
+  a meaningless apples-to-oranges metric, since both paths end at F32. With the
+  widen fused in at equal F32 output, the two-step offered no timing or memory win
+  and was removed (#388).
 
 ### Qwen tool-calling (this work, 12 new tests)
 
