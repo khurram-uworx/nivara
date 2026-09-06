@@ -445,8 +445,11 @@ as SmolLM).
 - **`SafeTensorsLoader.Read<float>` fused BF16→F32 (`WidenBf16ToF32`)**: the default
   load reads the BF16-on-disk weights and SIMD-widens them straight into each
   tensor's `float[]` via the vectorized `TensorPrimitives` kernel — no interim
-  `ushort[]` (a one-pass read, ~1 GB less peak memory than the previous two-step;
-  ~0.7–2.2 s for the 989 MB file on this machine in Release).
+  `ushort[]`, and the string-path load memory-maps the file so no full-file `byte[]`
+  is materialized either (a one-pass read; ~1.88 GB peak managed heap for Qwen,
+  ~0.94 GB below the old copy-into-`byte[]` load; ~1.1–1.4 s for the 989 MB file on
+  this machine in Release [median ~1.3 s warm] — the mmap read trades ~0.5 s of
+  warm-load time vs a raw `ReadAllBytes` copy for the ~1 GB managed-heap saving).
 - **`LlamaLoader` qkvBias auto-detect**: presence of
   `model.layers.0.self_attn.q_proj.bias` flips the attention to biased
   projections (no manual flag).
@@ -464,7 +467,7 @@ tokenizer into `src/Nivara`, GGUF loading (Phase 5).
 |---|---|---|
 | `qwen tools` (default fused load) | 2026-09-06 | tool-call turn: 19 tok, 173,900 ms (~9,153 ms/tok cached); final turn: 25 tok, 227,800 ms; fixture ids MATCH (206/258), 19/19 generated ids (Release) |
 | `qwen benchmark` | 2026-09-06 | KV cache median 189,150 ms vs full re-forward 204,385 ms (19 tok) → 1.1× (Debug build; Release run failed mid-decode — #386 will provide fresh numbers) |
-| Load parse (fused, default) | 2026-09-06 | ~0.8 s median (0.7–2.2 s; Release; 290 tensors, 989 MB BF16-on-disk) — no regression vs the removed two-step (2.07–2.16 s) |
+| Load parse (fused, default) | 2026-09-06 | ~1.3 s median warm (1.1–1.4 s; Release; 290 tensors, 989 MB BF16-on-disk; memory-mapped, peak managed heap ~1.88 GB) — no interim `ushort[]` (+#388) and no full-file `byte[]` (+#392); the mmap read is ~0.5 s slower than a warm `ReadAllBytes` copy in exchange for the ~1 GB managed-heap saving |
 
 **Why the KV speedup is small here**: the tool prompt is 206 tokens and the
 generated turn just 19, so the cache-free path re-feeds only a slightly
@@ -477,12 +480,15 @@ logical processors, .NET 11.0.0, Release build):
 
 | Load precision | Load parse | KV-cached per-token | Full re-forward per-token | Speedup |
 |---|---|---|---|---|
-| f32 default (fused BF16→F32 SIMD widen) | ~0.8 s median (0.7–2.2 s) | 9,153 ms/tok (Release) | 10,757 ms/tok (Debug) | — (see note) |
+| f32 default (fused BF16→F32 SIMD widen) | ~1.3 s median warm (1.1–1.4 s) | 9,153 ms/tok (Release) | 10,757 ms/tok (Debug) | — (see note) |
 
-<sup>Load parse is the fused `Read<float>` (Release build, 2026-09-06, `qwen tools`):
-the 989 MB BF16-on-disk file SIMD-widens straight into `float[]` with no interim
-`ushort[]` (one pass, ~1 GB less peak memory than the previous two-step). The
-spread is OS file-cache state. The KV-cached per-token figure is Release; the
+<sup>Load parse is the fused memory-mapped `Read<float>` (Release build, 2026-09-06,
+`qwen tools`): the 989 MB BF16-on-disk file memory-maps and SIMD-widens straight
+into `float[]` with no interim `ushort[]` and no full-file `byte[]` (one pass,
+~1.88 GB peak managed heap vs ~2.83 GB for a copy-into-`byte[]` load; the mmap
+read trades ~0.5 s of warm-load time for that ~1 GB managed-heap saving —
+physical working set is similar either way because the OS page cache holds the
+file either way). The KV-cached per-token figure is Release; the
 full re-forward per-token and the 1.1× KV speedup are Debug-era (benchmark chain).
 The Release benchmark run failed mid-decode and will be refreshed via the
 dedicated-machine cycle (issue #386), when both decode paths are re-measured in
@@ -662,8 +668,7 @@ runs normally (e.g. the SST-2 mode still prints each predicted label).
 
 The sample includes a custom zero-dependency `SafeTensorsLoader` that parses the HuggingFace SafeTensors binary format directly:
 
-- **Memory-mapped header parsing** via `System.Text.Json` — reads the JSON header from the first 8 bytes + offset table
-- **Zero-copy tensor extraction** using `MemoryMarshal.Cast<byte, float>` — the weight data is reinterpret-cast directly from the memory-mapped file buffer
+- **Memory-mapped file loading** (`MemoryMappedFile` + `CreateViewAccessor` + `AcquirePointer`): the string-path loads memory-map the safetensors file and read each tensor's bytes directly from the mapped view — no full-file `byte[]` is materialized, so peak managed memory is just the widened tensors (~1.88 GB for Qwen, ~0.94 GB below the old copy-into-`byte[]` load). Parses the JSON header from the first 8 bytes + offset table via `System.Text.Json`.
 - **Dtype support** — loads **F32** (native `float`), **F16** (`System.Numerics.Half`), and **BF16** (`System.Numerics.BFloat16`) tensors, converting each to the requested result type `T` via `T.CreateChecked`. Narrow on-disk dtypes are widened when `T` is wider (e.g. a BF16 checkpoint read as `float[]` widens losslessly), and a wider on-disk dtype is narrowed when `T` is `BFloat16` (e.g. the `bf16` run mode reads the on-disk F32 weights as `BFloat16`, truncating to genuine 7-bit mantissa). Any other dtype raises `NotSupportedException` with guidance.
 
 ## Performance benchmarks
@@ -840,7 +845,7 @@ AutoDiff graph nodes are only created inside `GradientUtils.Grad()` scopes (used
 | `LlamaForCausalLM<T>` greedy decode (inference-default) | Tool-call turn (19 tok) + answer turn, no `GradientUtils.Grad()` scope |
 | Function-calling loop (`QwenToolParser` + `<tool_call>`/`<tool_response>`) | `getWeather` → tool result fed back → final answer |
 | `Gpt2BpeTokenizer` `Split`-regex pretokenizer + added tokens | Qwen tokenizer path (byte-verified against the HF fixture, 206/258 ids) |
-| `SafeTensorsLoader.Read<float>` fused BF16→F32 (`WidenBf16ToF32`) | Default load (BF16-on-disk → F32, no interim `ushort[]`, ~0.8 s median Release) |
+| `SafeTensorsLoader.Read<float>` fused BF16→F32 (`WidenBf16ToF32`) | Default load (BF16-on-disk → F32, memory-mapped, no interim `ushort[]`/`byte[]`, ~1.3 s median warm Release, ~1.88 GB peak managed) |
 | Teacher distillation inside `GradientUtils.Grad()` | `SentimentMLP` 200-epoch training + linear baseline vs DistilBERT SST-2 eval table |
 | FNV-1a word+bigram feature hashing (4096-dim BOW) | Student/linear input features from raw sentences |
 | Resumable label cache + `--force` | `qwen_distill_labels.json` merge/recompute |

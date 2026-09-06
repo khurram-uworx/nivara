@@ -267,12 +267,16 @@ BF16→F32 widen directly into the read — never materializing an interim `usho
   SIMD chain (`Vector.Widen` → `<<16` → bit-reinterpret) with a scalar tail. It
   property-matches the scalar reference for **all 65,536** BF16 patterns;
   `ConvertBF16<float>` routes through the same kernel, so the F32 read path is
-  SIMD for free (one pass, no interim `ushort[]`, ~1 GB less peak memory than a
-  two-step raw read + widen).
+  SIMD for free (one pass, no interim `ushort[]`). The string-path load
+  **memory-maps the file** (#392) and reads each tensor's bytes straight from the
+  mapped view — no full-file `byte[]` — so the peak **managed** heap is just the
+  widened tensors (~1.88 GB for Qwen), ~1 GB below the old copy-into-`byte[]`
+  load (2.83 GB).
 - The Qwen2.5-0.5B checkpoint (988 MB BF16, F32-target load) loads in roughly
-  **0.7–2.2 s** on this machine (Release; the OS file cache drives the spread) —
-  **no regression** vs the earlier two-step, with identical F32 inference numerics
-  (widening is lossless — BF16 is the high 16 bits of float32). The two-step's
+  **1.1–1.4 s** on this machine (Release; median ~1.3 s warm) with identical F32
+  inference numerics (widening is lossless — BF16 is the high 16 bits of float32).
+  The mmap read trades ~0.5 s of warm-load time (per-page soft-fault overhead for
+  random per-tensor access) for the ~1 GB managed-heap saving; the two-step's
   documented "~2.5× faster / half the memory" claim was an apples-to-oranges
   comparison (half-size `ushort[]` output with no widen vs full-size `float[]`
   with widen); at equal F32 output the two-step offered nothing and was removed
