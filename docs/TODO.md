@@ -71,8 +71,16 @@ The docs' "~2.5× faster / half the RAM" claim for the two-step was an apples-to
 
 1. `docs: plan #388 in TODO.md` — this file. ✅ (fcd086c)
 2. `refactor(samples): remove ReadUInt16/WidenToF32 two-step from SafeTensorsLoader` + `refactor(samples): drop --precision ushort from qwen default load` — ✅ combined into a single commit (a8562e6) because `SafeTensorsLoader.cs` and its caller `Program.cs` must land together to keep the build green (removing the symbols without updating the caller breaks compilation).
-3. `test: add fused Read<float> parity vs scalar reference and Qwen checkpoint check` — update `SafeTensorsLoaderBf16Tests.cs`.
-4. `docs: remove invalid 2.5x framing, document single fused BF16->F32 load` — update the four docs + README load-parse row.
+3. `test: add fused Read<float> parity vs scalar reference and Qwen checkpoint check` — ✅ (eb820b4) `SafeTensorsLoaderBf16Tests.cs`.
+4. `docs: remove invalid 2.5x framing, document single fused BF16->F32 load` — ✅ (e81de97) the four docs + README load-parse row.
+
+## Verification results
+
+- Build: Nivara.Samples, NivaraInference, Nivara.Tests all build clean (0 warnings / 0 errors, Debug).
+- Targeted tests: `dotnet test --filter SafeTensorsLoaderBf16Tests` — 5/5 passed (incl. the Qwen checkpoint test, not skipped — model.safetensors present, 290 tensors).
+- Fused load benchmark (this machine, Release): median ~0.8 s warm (0.7–2.2 s across OS file-cache states) vs the two-step's 2.07–2.16 s — **no regression**. ~1 GB less peak via removal of the interim 942 MB `ushort[]` (structural; live `PeakWorkingSet64` is unreliable on this OS, so the saving is documented structurally).
+- No `dotnet test` full suite run yet — pending at a review gate.
+
 
 ## GitHub issues log
 
