@@ -5,7 +5,6 @@ using Nivara.AutoDiff.Nn.Functional;
 using Nivara.AutoDiff.Optimizer;
 using Nivara.AutoDiff.Utilities;
 using Nivara.Samples;
-using System.Numerics;
 using System.Numerics.Tensors;
 using System.Text;
 using System.Text.Encodings.Web;

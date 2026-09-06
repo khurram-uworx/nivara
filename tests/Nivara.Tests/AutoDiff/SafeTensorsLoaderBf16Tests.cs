@@ -2,7 +2,6 @@ using Nivara.Samples;
 using NUnit.Framework;
 using System.Buffers.Binary;
 using System.Diagnostics;
-using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
 

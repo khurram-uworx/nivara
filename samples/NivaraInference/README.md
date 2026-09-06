@@ -402,7 +402,7 @@ dotnet run --project samples/NivaraInference -c Release -- qwen benchmark
 
 **Precision**: `f32` is the **default** for `qwen` — the checkpoint is
 BF16-on-disk and the load **fuses** the SIMD `WidenBf16ToF32` widen directly into
-each tensor's `float[]` (numerically identical weights; no interim `ushort[]`).
+each tensor's `float[]` (numerically identical weights).
 The 989 MB checkpoint loads in ~0.7–2.2 s on this machine in Release (OS file
 cache drives the spread; median ~0.8 s warm). `bf16`/`fp16` are rejected for
 `qwen` with a clear error (the generation loop is F32).
@@ -444,8 +444,8 @@ as SmolLM).
   fixture's 206 — fixed to `}}}`.)
 - **`SafeTensorsLoader.Read<float>` fused BF16→F32 (`WidenBf16ToF32`)**: the default
   load reads the BF16-on-disk weights and SIMD-widens them straight into each
-  tensor's `float[]` via the vectorized `TensorPrimitives` kernel — no interim
-  `ushort[]`, and the string-path load memory-maps the file so no full-file `byte[]`
+  tensor's `float[]` via the vectorized `TensorPrimitives` kernel — the string-path
+  load memory-maps the file so no full-file `byte[]`
   is materialized either (a one-pass read; ~1.88 GB peak managed heap for Qwen,
   ~0.94 GB below the old copy-into-`byte[]` load; ~1.1–1.4 s for the 989 MB file on
   this machine in Release [median ~1.3 s warm] — the mmap read trades ~0.5 s of
@@ -467,7 +467,7 @@ tokenizer into `src/Nivara`, GGUF loading (Phase 5).
 |---|---|---|
 | `qwen tools` (default fused load) | 2026-09-06 | tool-call turn: 19 tok, 173,900 ms (~9,153 ms/tok cached); final turn: 25 tok, 227,800 ms; fixture ids MATCH (206/258), 19/19 generated ids (Release) |
 | `qwen benchmark` | 2026-09-06 | KV cache median 189,150 ms vs full re-forward 204,385 ms (19 tok) → 1.1× (Debug build; Release run failed mid-decode — #386 will provide fresh numbers) |
-| Load parse (fused, default) | 2026-09-06 | ~1.3 s median warm (1.1–1.4 s; Release; 290 tensors, 989 MB BF16-on-disk; memory-mapped, peak managed heap ~1.88 GB) — no interim `ushort[]` (+#388) and no full-file `byte[]` (+#392); the mmap read is ~0.5 s slower than a warm `ReadAllBytes` copy in exchange for the ~1 GB managed-heap saving |
+| Load parse (fused, default) | 2026-09-06 | ~1.3 s median warm (1.1–1.4 s; Release; 290 tensors, 989 MB BF16-on-disk; memory-mapped, peak managed heap ~1.88 GB); the mmap read is ~0.5 s slower than a warm `ReadAllBytes` copy in exchange for the ~1 GB managed-heap saving |
 
 **Why the KV speedup is small here**: the tool prompt is 206 tokens and the
 generated turn just 19, so the cache-free path re-feeds only a slightly
@@ -484,8 +484,7 @@ logical processors, .NET 11.0.0, Release build):
 
 <sup>Load parse is the fused memory-mapped `Read<float>` (Release build, 2026-09-06,
 `qwen tools`): the 989 MB BF16-on-disk file memory-maps and SIMD-widens straight
-into `float[]` with no interim `ushort[]` and no full-file `byte[]` (one pass,
-~1.88 GB peak managed heap vs ~2.83 GB for a copy-into-`byte[]` load; the mmap
+into `float[]`; the mmap
 read trades ~0.5 s of warm-load time for that ~1 GB managed-heap saving —
 physical working set is similar either way because the OS page cache holds the
 file either way). The KV-cached per-token figure is Release; the
@@ -845,7 +844,7 @@ AutoDiff graph nodes are only created inside `GradientUtils.Grad()` scopes (used
 | `LlamaForCausalLM<T>` greedy decode (inference-default) | Tool-call turn (19 tok) + answer turn, no `GradientUtils.Grad()` scope |
 | Function-calling loop (`QwenToolParser` + `<tool_call>`/`<tool_response>`) | `getWeather` → tool result fed back → final answer |
 | `Gpt2BpeTokenizer` `Split`-regex pretokenizer + added tokens | Qwen tokenizer path (byte-verified against the HF fixture, 206/258 ids) |
-| `SafeTensorsLoader.Read<float>` fused BF16→F32 (`WidenBf16ToF32`) | Default load (BF16-on-disk → F32, memory-mapped, no interim `ushort[]`/`byte[]`, ~1.3 s median warm Release, ~1.88 GB peak managed) |
+| `SafeTensorsLoader.Read<float>` fused BF16→F32 (`WidenBf16ToF32`) | Default load (BF16-on-disk → F32, memory-mapped, ~1.3 s median warm Release, ~1.88 GB peak managed) |
 | Teacher distillation inside `GradientUtils.Grad()` | `SentimentMLP` 200-epoch training + linear baseline vs DistilBERT SST-2 eval table |
 | FNV-1a word+bigram feature hashing (4096-dim BOW) | Student/linear input features from raw sentences |
 | Resumable label cache + `--force` | `qwen_distill_labels.json` merge/recompute |
