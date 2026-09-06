@@ -122,9 +122,11 @@ static Dictionary<string, (T[] Data, int[] Shape)> Read<T>(ReadOnlySpan<byte> bu
   `Read(File.ReadAllBytes(path))`, assert full 290-tensor key/shape/value equality — the
   definitive end-to-end gate.
 
-### 4. A/B benchmark (temp harness, outside repo, not committed)
-- `C:\Users\khurram\AppData\Local\Temp\opencode\safetensors_mmap_bench\`:
-  `safetensors_mmap_bench.csproj` (refs `Nivara.Samples`) + `Program.cs`.
+### 4. A/B benchmark — `--safetensors-mmap <path>` in `tests/Nivara.PerformanceTests`
+- Add a standalone `--safetensors-mmap [<path>]` mode to `tests/Nivara.PerformanceTests`
+  (mirrors the existing `--dataset-test` opt-in pattern in `IncidentLabBenchmark.cs`), in
+  `SafeTensorsLoadBenchmark.cs` + a `Program.ParseArgs` flag + a README note. Committed with
+  the repo, so future safetensors-load work reuses it instead of a throwaway harness.
 - Median-of-3 (Release, this machine) on `samples/data/qwen2.5-0.5b-instruct/model.safetensors`:
   - Before: `SafeTensorsLoader.Read(File.ReadAllBytes(path))`
   - After:  `SafeTensorsLoader.Read(path)`
@@ -139,6 +141,9 @@ static Dictionary<string, (T[] Data, int[] Shape)> Read<T>(ReadOnlySpan<byte> bu
   `Load parse` row/note if the A/B numbers move.
 - `docs/BFLOAT16.md`: fused-path section — mention the load is memory-mapped (no full-file
   `byte[]`).
+- `AGENTS.md`: guide agents to the existing `tests/` perf probes
+  (`Nivara.PerformanceTests`, `Nivara.SimdProbe`) instead of ad-hoc temp harnesses, and to
+  add modes into the matching project rather than starting new ones.
 
 ## Verification
 
@@ -147,8 +152,7 @@ static Dictionary<string, (T[] Data, int[] Shape)> Read<T>(ReadOnlySpan<byte> bu
   new fixture-file parity test; Qwen checkpoint tests gated on file presence. Existing
   real-file tests (`PerfTests`, `QwenInstructParityTests`, `QwenToolsWeatherLoopTests`,
   `DistilBertPrecisionInferenceTests`) exercise the mmap path automatically.
-- A/B benchmark (ask before running): fused ReadAllBytes vs fused mmap — timing + managed-heap
-  high-water; record honestly.
+- A/B benchmark via `tests/Nivara.PerformanceTests`: `dotnet run -c Release --project tests/Nivara.PerformanceTests -- --safetensors-mmap samples/data/qwen2.5-0.5b-instruct/model.safetensors` (ask before running) — timing + managed-heap high-water; record honestly.
 - Full suite: ask before running.
 
 ## Blast radius
@@ -173,7 +177,13 @@ static Dictionary<string, (T[] Data, int[] Shape)> Read<T>(ReadOnlySpan<byte> bu
    `SafeTensorsLoader.cs` (span core + mmap) together to keep the build green.
 3. `test: verify memory-mapped load matches the byte[] path` — fixture-file parity + Qwen
    checkpoint 290-tensor value parity.
-4. `docs: describe the memory-mapped safetensors load` — QWEN.md, BFLOAT16.md,
+4. `feat(perf): add safetensors mmap A/B mode to PerformanceTests` —
+   `SafeTensorsLoadBenchmark.cs` + `--safetensors-mmap` flag + `PerformanceTests/README.md`
+   (the harness lives in the repo, not a temp dir; temp harness deleted).
+5. `docs: guide agents to probe/harness lifecycle` — `AGENTS.md` factual bullet (what the
+   `tests/` projects are) + iterative-work `SKILL.md` lifecycle rule (start in temp → evaluate
+   reusability → incorporate into matching `tests/` project).
+6. `docs: describe the memory-mapped safetensors load` — QWEN.md, BFLOAT16.md,
    NivaraInference README (record A/B numbers after the benchmark).
 
 ## GitHub issues log
