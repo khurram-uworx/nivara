@@ -79,7 +79,7 @@ The docs' "~2.5× faster / half the RAM" claim for the two-step was an apples-to
 - Build: Nivara.Samples, NivaraInference, Nivara.Tests all build clean (0 warnings / 0 errors, Debug).
 - Targeted tests: `dotnet test --filter SafeTensorsLoaderBf16Tests` — 5/5 passed (incl. the Qwen checkpoint test, not skipped — model.safetensors present, 290 tensors).
 - Fused load benchmark (this machine, Release): median ~0.8 s warm (0.7–2.2 s across OS file-cache states) vs the two-step's 2.07–2.16 s — **no regression**. ~1 GB less peak via removal of the interim 942 MB `ushort[]` (structural; live `PeakWorkingSet64` is unreliable on this OS, so the saving is documented structurally).
-- No `dotnet test` full suite run yet — pending at a review gate.
+- No `dotnet test` full suite run — skipped by request at Gate G2 (user opted to rely on the targeted `SafeTensorsLoaderBf16Tests` 5/5 + clean builds).
 
 
 ## GitHub issues log
