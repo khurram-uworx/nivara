@@ -22,6 +22,38 @@ decision or red flag is never resolved by assumption when the human can be asked
 8. **Create GitHub issues during execution, not after** — as each task executes, if you find deferred work or a concern (known limitations, follow-ups, refactors) that is outside the current plan, create a tracked issue immediately via `gh issue create --repo khurram-uworx/Nivara` and record its number in the GitHub issues log in `docs/TODO.md`. Don't rely on memory or wait until the plan finishes — compaction can lose it.
 9. **Involve the human at decision points** — if a plan, grounding pass, review, or failure surfaces a decision or red flag, stop and ask rather than assume — especially when the blast radius is more than trivial. Quick wins are a warning sign, not the goal.
 
+## Probe and harness lifecycle
+
+When the work calls for a performance measurement, an A/B comparison, or an isolated code probe:
+
+1. **Start in a temp location** — create the harness or probe under a temp directory
+   (e.g. `C:\Users\khurram\AppData\Local\Temp\opencode\`) as a standalone project, just as
+   agents naturally do. Run it there and evaluate the results.
+
+2. **Decide if it's reusable** — after the probe runs, determine whether the harness or probe
+   measures something that will be needed again (a regression gate, an A/B revisited across
+   branches, a future perf decision). If yes, incorporate it before committing the branch.
+   If it's a one-off throwaway, leave the temp artifact for the human to clean up.
+
+3. **Incorporate into the matching `tests/` project** — place the reusable harness/probe into
+   the appropriate existing project rather than leaving it in a temp dir or creating a new
+   standalone project:
+   - `tests/Nivara.PerformanceTests` — general throughput, allocation, and memory A/B work.
+     Add a scenario row (for repeatable ops) or a standalone `--<mode>` flag (for one-off A/B
+     comparisons like `--safetensors-mmap`), following the existing `--dataset-test` pattern
+     in `IncidentLabBenchmark.cs`. See its `README.md` for how to add modes and document them.
+   - `tests/Nivara.SimdProbe` — SIMD-specific probes (hardware intrinsics, widen-compute-narrow
+     decisions). Add a subcommand following the `Correctness`/`Benchmark` pattern. See its
+     `README.md`.
+   Only create a brand-new probe project when no existing category fits.
+
+4. **Record the lifecycle in `docs/TODO.md`** — note the probe's temp origin, the reusability
+   decision, and its final location, so the branch review (G2) sees the full story and future
+   agents know where to extend it.
+
+5. **Clean up the temp copy** — once the incorporated harness builds and is verified in
+   `tests/`, delete the temp directory so there is no drift between the two copies.
+
 ## Plan-first workflow
 
 Persist the plan before executing so it is saved at highest fidelity, even if context is later lost.
